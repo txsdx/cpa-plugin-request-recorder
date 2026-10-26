@@ -29,7 +29,7 @@ CLIProxyAPI 的原生插件：在模型请求结束后记录请求与响应，�
 
 Linux 包在 Debian 12 / glibc 环境原生编译，匹配所检查 CPA Dockerfile 的系统基线；Alpine / musl 和 Windows ARM64 不包含在这五种发布目标中。Docker 部署应按 **容器内部** 的 OS / 架构选择，不是按浏览器或宿主桌面系统选择。
 
-以 Linux amd64 的 `v0.1.0` 为例（先确认该版本已经在 Releases 生成）：
+以已发布的 Linux amd64 `v0.1.0` 为例：
 
 1. 下载 `request-recorder_0.1.0_linux_amd64.zip` 和 `checksums.txt`，放在同一目录。
 2. 校验并解压到 CPA 的插件目录：
@@ -126,8 +126,8 @@ plugins:
 
 ```bash
 git fetch origin
-git tag v0.1.0 origin/main
-git push origin v0.1.0
+git tag v0.2.0 origin/main
+git push origin v0.2.0
 ```
 
 每个正式 Release 必须包含：
@@ -143,6 +143,8 @@ registry.json
 ```
 
 版本不带 `v` 写进附件名，Git 标签带 `v`。ZIP 根目录只有 `request-recorder.so` / `.dylib` / `.dll`，不包含目录、`.h` 文件或其他动态库。发布前会使用固定 CPA 源码中的真实 registry 解析器和安装器校验全部五个平台的实际产物、重复安装、版本判断及校验和拒绝行为。
+
+首版 `v0.1.0` 已完成五个平台构建与发布。额外验证了从线上私有 registry 读取最新 Release、使用文档中的 scoped GitHub 认证、通过 CPA 官方安装器真实下载并校验 Linux amd64 插件；公开 Release 中的五份 ZIP 及其校验和也已逐份复核。
 
 根目录 `registry.json` 省略可选展示版本，长期作为稳定的商店源；Release 附件中的 registry 由同一元数据自动生成，包含该 Release 版本。CPA 以 GitHub 最新正式 Release 为版本真相，因此更新不需要 Action 回写 main。正式发布版本不会被覆盖，失败只留下可重试的 draft；发布使用仓库自带的 `GITHUB_TOKEN`，不需额外 PAT。
 

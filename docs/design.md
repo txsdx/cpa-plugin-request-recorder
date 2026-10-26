@@ -68,4 +68,4 @@ flowchart LR
 2. 不能从现有 hook 强行取得客户端 socket IP；只采用宿主元数据中的 client_ip / resolved_client_ip，不擅自信任 X-Forwarded-For。当前实际验证宿主未向插件暴露 IP，UI 显示未知。
 3. Native WebSocket observer、二进制 multipart 上传和其他未列出的协议尚未实现。它们不能因普通 HTTP 测试通过就视为支持。
 4. 后续插件 / 宿主在 response hook 后仍可修改数据。插件优先级只能控制观察位置，不能取代最外层 HTTP tee。若要保证“客户端实际收到的逐字节响应”，需要宿主新增最终输出 observer。
-5. 发布到插件商店、GitHub Release、多平台装载验证与真实上游账号验证不包含在本轮本地模拟测试中。
+5. 已发布 GitHub Release，并提供可添加到 CPA 的自定义 registry；五个平台通过原生构建和官方安装器验证，Linux amd64 完成发布库的实际装载。官方商店上架、其他平台在真实 CPA 中装载、真实上游账号验证尚未完成。
