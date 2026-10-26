@@ -12,7 +12,8 @@ CLIProxyAPI 的原生插件：在模型请求结束后更新完整会话，在 *
 - 查看请求时间、总耗时、宿主 TTFT、首分片耗时、输入/输出/思考/cache read/cache creation token 与缓存比例；缺失指标显示 `—`。
 - 对话回放支持 OpenAI Chat Completions / Responses、Claude Messages、Gemini：系统指令、用户消息、模型输出、公开的思考内容/摘要、工具名、调用参数、调用 ID、工具返回值。
 - **显示原始图片**：OpenAI `image_url` / `input_image`、Claude base64/url source、Gemini inlineData/fileData、OpenAI 图片生成 `b64_json` / Responses `image_generation_call`。内嵌图片和公网 HTTPS 图片由 CPA 服务端保存到插件图片目录，通过管理鉴权接口展示 WebP 压缩预览，点击下载时才传输原图；浏览器不访问图片源站。原始多模态字段保留在正文和 JSON 导出中。
-- 本地 bbolt 持久化、摘要/时间/trace 索引、分页、历史别名修改、保留期限和条目上限、JSON 导出。无需外部数据库。
+- 会话详情支持一键导出 Markdown：完整多轮消息、可见思考、工具参数 / 返回与内嵌原图；同时保留 JSON 导出。
+- 本地 bbolt 持久化、摘要/时间/trace 索引、分页、历史别名修改、保留期限和条目上限。无需外部数据库。
 
 **重要边界：**纯插件钩子不能承诺记录所有 HTTP 入口。未进入请求拦截器的鉴权失败、路由前错误、非模型接口不在当前采集范围；WebSocket 专用响应事件和 multipart 二进制正文回放尚未实现。模型最终结果来自 CPA 响应回调。详见 [设计与数据边界](docs/design.md)。
 
@@ -30,15 +31,15 @@ CLIProxyAPI 的原生插件：在模型请求结束后更新完整会话，在 *
 
 Linux 包在 Debian 12 / glibc 环境原生编译，匹配所检查 CPA Dockerfile 的系统基线；Alpine / musl 和 Windows ARM64 不包含在这五种发布目标中。Docker 部署应按 **容器内部** 的 OS / 架构选择，不是按浏览器或宿主桌面系统选择。
 
-以 Linux amd64 `v0.5.0` 为例：
+以 Linux amd64 `v0.6.0` 为例：
 
-1. 下载 `request-recorder_0.5.0_linux_amd64.zip` 和 `checksums.txt`，放在同一目录。
+1. 下载 `request-recorder_0.6.0_linux_amd64.zip` 和 `checksums.txt`，放在同一目录。
 2. 校验并解压到 CPA 的插件目录：
 
    ```bash
    sha256sum --ignore-missing --check checksums.txt
    mkdir -p /path/to/CLIProxyAPI/plugins/linux/amd64
-   unzip request-recorder_0.5.0_linux_amd64.zip -d /path/to/CLIProxyAPI/plugins/linux/amd64
+   unzip request-recorder_0.6.0_linux_amd64.zip -d /path/to/CLIProxyAPI/plugins/linux/amd64
    ```
 
 3. 合并下面的插件配置，设置数据库持久化，然后重启 CPA。无需配置日志目录。
@@ -92,7 +93,7 @@ plugins:
     - "https://raw.githubusercontent.com/txsdx/cpa-plugin-request-recorder/main/registry.json"
 ```
 
-刷新商店，选择 `CPA Request Recorder · 请求记录`，点击安装。以后刷新检查更新，再点击更新即可。CPA 从仓库的**最新正式 Release**解析版本，自动选择 OS / CPU 对应 zip，校验 `checksums.txt`，并写入带版本的库文件（例如 `plugins/linux/amd64/request-recorder-v0.5.0.so`）。不要为了匹配版本再手动重命名 Release 的 zip 或库。
+刷新商店，选择 `CPA Request Recorder · 请求记录`，点击安装。以后刷新检查更新，再点击更新即可。CPA 从仓库的**最新正式 Release**解析版本，自动选择 OS / CPU 对应 zip，校验 `checksums.txt`，并写入带版本的库文件（例如 `plugins/linux/amd64/request-recorder-v0.6.0.so`）。不要为了匹配版本再手动重命名 Release 的 zip 或库。
 
 安装源解决的是下载安装和版本更新。仍需按本文配置数据库持久化；GUI 通过 CPAMC 插件资源打开。更新是否热加载或要求重启由 CPA 版本及运行平台决定。预发布版本不会被 GitHub latest 接口当作正式更新推送。
 
@@ -266,6 +267,14 @@ GUI 的 **存储占用** 区分活动文件、空闲页、正文合计、去重�
 
 列表区域宽度为视口的 90%，最后两列为**最新用户提示词**与**模型最新响应**，共用剩余宽度。元数据列使用紧凑宽度，预览最多显示六行；点击条目查看全文。列表保留 8 列，移除服务商侧结果列，为提示词和回答提供更多宽度。打开的会话在新轮次到达时随列表刷新。窄屏在列表内部横向滚动。自动刷新跳过正在进行的刷新，不重复创建请求；数据未变化时不重建条目。
 
+### 导出完整会话到 Markdown
+
+打开会话详情，点击标题旁的 **↓ 导出 Markdown**，下载 `conversation-<会话ID>.md`。导出使用数据库中的完整会话快照，包含各轮系统 / 开发者提示、用户提问、模型回答、已公开的思考摘要、工具名 / 调用 ID / 参数和返回值，按消息顺序排列；不是只导出最新一轮。文本保留 Markdown，工具数据使用代码块。
+
+已归档原图或正文中有效的内嵌原图使用 `data:` URI 嵌入同一个文件，重复图片只写入一份，不需要图片服务或管理密钥即可离线查看。Markdown 阅读器需要支持 data URI 图片；GitHub 等会过滤这类图片的渲染器可能不显示，但原始图片字节仍在文件里。原图尚未归档或不可用时，会在对应位置注明原因，导出操作不会访问远程源站。原有 **↓ 导出 JSON** 按钮保留。
+
+下载走 CPA 管理鉴权接口，沿用 CPA 的 TLS。导出文件总大小（含原图 base64）受 `max_body_bytes` 限制，默认 64 MiB；超过限制会提示错误，不下载截断文件。采集时已有的警告和错误会写入文件。
+
 ### 对话、图片和日志存在哪里
 
 默认路径相对于 **CPA 进程工作目录**，不相对于 CPAMC 浏览器或配置文件目录：
@@ -299,6 +308,7 @@ GUI 的 **存储占用** 区分活动文件、空闲页、正文合计、去重�
 | --- | --- |
 | `GET /records` | 摘要列表、筛选、分页 |
 | `GET /record?id=…` | 最新会话原文与完整对话；GUI 初次打开用 `view=chat` 省略大正文，原文页签 / 导出再加载 |
+| `GET /export/markdown?id=…` | 下载完整会话 Markdown，内嵌可用原图；超出 max_body_bytes 返回 413，图片读取繁忙返回 429 |
 | `GET /storage` | 活动文件、空闲页、容量淘汰、压缩去重后正文与整理状态 |
 | `POST /settings` | `{"refresh_interval_seconds":1}`，设置列表刷新间隔 |
 | `GET /status` | 采集、用量、存储错误，以及图片目录 / 配额 / 待处理数 |

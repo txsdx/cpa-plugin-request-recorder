@@ -17,7 +17,7 @@ const APIBase = "/v0/management/plugins/" + PluginID
 const ResourceBase = "/v0/resource/plugins/" + PluginID
 
 // Version is injected from the validated release tag by the build.
-var Version = "0.5.0"
+var Version = "0.6.0"
 
 func Registration() map[string]any {
 	return map[string]any{"schema_version": 6, "metadata": map[string]any{
@@ -46,7 +46,7 @@ func Registration() map[string]any {
 }
 func ManagementRegistration() map[string]any {
 	routes := []map[string]string{}
-	for _, p := range [][2]string{{"GET", "/records"}, {"GET", "/record"}, {"GET", "/status"}, {"GET", "/storage"}, {"GET", "/image"}, {"GET", "/images"}, {"POST", "/settings"}, {"POST", "/aliases"}, {"POST", "/aliases/sync"}, {"POST", "/images/retry"}} {
+	for _, p := range [][2]string{{"GET", "/records"}, {"GET", "/record"}, {"GET", "/export/markdown"}, {"GET", "/status"}, {"GET", "/storage"}, {"GET", "/image"}, {"GET", "/images"}, {"POST", "/settings"}, {"POST", "/aliases"}, {"POST", "/aliases/sync"}, {"POST", "/images/retry"}} {
 		routes = append(routes, map[string]string{"Method": p[0], "Path": APIBase + p[1]})
 	}
 	return map[string]any{"Routes": routes, "Resources": []map[string]string{
@@ -87,6 +87,8 @@ func (e *Engine) Management(req wire.ManagementRequest, web fs.FS) wire.Manageme
 	path := strings.TrimPrefix(req.Path, APIBase)
 	if req.Method == "GET" {
 		switch path {
+		case "/export/markdown":
+			return e.markdownResponse(req.Query.Get("id"))
 		case "/storage":
 			stats, err := e.store.StorageStats()
 			if err != nil {

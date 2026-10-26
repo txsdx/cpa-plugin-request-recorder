@@ -183,6 +183,16 @@ plugins:
         assert any('图里是什么？' in message.get('content','') for message in history['conversation'])
         assert sum('159,' in message.get('content','') for message in history['conversation'])==2
         assert any(message.get('images') for message in history['conversation'])
+        markdown_path='/v0/management/plugins/request-recorder/export/markdown?id='+stream_head['id']
+        markdown=request(markdown_path).decode('utf-8')
+        assert markdown.startswith('# 完整会话记录')
+        assert '图里是什么？' in markdown and '继续解释这张图' in markdown
+        assert markdown.count('完整最终快照：')==2
+        assert markdown.count(IMAGE)==1, 'original image must be embedded once'
+        assert KEY not in markdown and MANAGEMENT not in markdown
+        try: request(markdown_path,key=None)
+        except urllib.error.HTTPError as e: assert e.code in (401,403)
+        else: raise AssertionError('unauthenticated Markdown export allowed')
         status=json.loads(request('/v0/management/plugins/request-recorder/status'))
         assert status['refresh_interval_seconds']==1 and status['max_database_bytes']==1073741824
         assert 'logs_enabled' not in status and 'pending_logs' not in status
@@ -201,7 +211,7 @@ plugins:
         assert alias['ok']
         page=json.loads(request('/v0/management/plugins/request-recorder/records?alias='+urllib.parse.quote('集成测试')))
         assert page['total']==2
-        print(json.dumps({'result':'PASS','records':2,'stream_chunks':160,'checks':['native CPA loading','public GUI registration','management authentication','nonstream and SSE capture','usage join','native Responses complete final snapshot without logs','latest conversation replaces prior snapshot','input and output images','authenticated local image archive','image file persistence','compressed WebP preview and original download','CPAMC alias sync authentication','alias filtering'],'workdir':str(work),'port':port},ensure_ascii=False))
+        print(json.dumps({'result':'PASS','records':2,'stream_chunks':160,'checks':['native CPA loading','public GUI registration','management authentication','nonstream and SSE capture','usage join','native Responses complete final snapshot without logs','latest conversation replaces prior snapshot','authenticated full-history Markdown export with original images','input and output images','authenticated local image archive','image file persistence','compressed WebP preview and original download','CPAMC alias sync authentication','alias filtering'],'workdir':str(work),'port':port},ensure_ascii=False))
         if os.environ.get('KEEP_RUNNING')=='1':
             print('KEEP_RUNNING: press Ctrl+C to stop',flush=True)
             while proc.poll() is None: time.sleep(1)

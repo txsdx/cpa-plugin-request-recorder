@@ -1101,6 +1101,44 @@ for (const b of document.querySelectorAll("[data-tab]"))
       notice(error.message);
     }
   };
+function downloadFile(blob, filename) {
+  const url = URL.createObjectURL(blob),
+    a = el("a");
+  a.href = url;
+  a.download = filename;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+$("export-markdown").onclick = async () => {
+  if (!detail) return;
+  const id = detail.record.id,
+    revision = authGeneration,
+    button = $("export-markdown");
+  button.disabled = true;
+  button.textContent = "正在导出…";
+  try {
+    const response = await fetch(
+      API + "/export/markdown?id=" + encodeURIComponent(id),
+      {
+        headers: { Authorization: "Bearer " + managementKey },
+        cache: "no-store",
+        credentials: "omit",
+      },
+    );
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new Error(error.error || "Markdown 导出失败（" + response.status + "）");
+    }
+    const blob = await response.blob();
+    if (revision !== authGeneration) return;
+    downloadFile(blob, "conversation-" + id + ".md");
+  } catch (error) {
+    if (revision === authGeneration) notice(error.message);
+  } finally {
+    button.disabled = false;
+    button.textContent = "↓ 导出 Markdown";
+  }
+};
 $("export").onclick = async () => {
   try {
     if (!(await ensureRawDetail())) return;
@@ -1108,12 +1146,7 @@ $("export").onclick = async () => {
     const blob = new Blob([JSON.stringify(content, null, 2)], {
       type: "application/json",
     });
-    const url = URL.createObjectURL(blob),
-      a = el("a");
-    a.href = url;
-    a.download = "conversation-" + detail.record.id + ".json";
-    a.click();
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    downloadFile(blob, "conversation-" + detail.record.id + ".json");
   } catch (error) {
     notice(error.message);
   }
