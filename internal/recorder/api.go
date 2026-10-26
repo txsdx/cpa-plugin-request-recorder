@@ -16,9 +16,12 @@ const PluginID = "request-recorder"
 const APIBase = "/v0/management/plugins/" + PluginID
 const ResourceBase = "/v0/resource/plugins/" + PluginID
 
+// Version is injected from the validated release tag by the build.
+var Version = "0.1.0"
+
 func Registration() map[string]any {
 	return map[string]any{"schema_version": 6, "metadata": map[string]any{
-		"Name": PluginID, "Version": "0.1.0", "Author": "txsdx", "GitHubRepository": "https://github.com/txsdx/cpa-plugin-request-recorder",
+		"Name": PluginID, "Version": Version, "Author": "txsdx", "GitHubRepository": "https://github.com/txsdx/cpa-plugin-request-recorder",
 		"ConfigFields": []map[string]string{
 			{"Name": "db_path", "Type": "string", "Description": "持久化数据库路径，变更需重启"},
 			{"Name": "logs_dir", "Type": "string", "Description": "CPA request-log 目录，用于关联上游原文"},

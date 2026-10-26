@@ -15,6 +15,75 @@ CLIProxyAPI 的原生插件：在模型请求结束后记录请求与响应，�
 
 **重要边界：**纯插件钩子不能承诺记录所有 HTTP 入口。未进入请求拦截器的鉴权失败、路由前错误、非模型接口不在当前采集范围；WebSocket 专用响应事件和 multipart 二进制正文回放尚未实现。这里不会把“协议转换后的下游响应”标成“原始上游响应”。详见 [设计与数据边界](docs/design.md)。
 
+## 下载 Release 安装（无需 Go / Node）
+
+仓库已配置 [Build and release](.github/workflows/release.yml)。推送 `vX.Y.Z` 标签后，测试通过才会自动发布 [GitHub Releases](https://github.com/txsdx/cpa-plugin-request-recorder/releases)。仅推送 main 不发布 Release；也可以在 Actions 手动运行该工作流，只生成构建 artifacts、不发布。仓库私有时，请用有仓库权限的 GitHub 账号登录后下载。
+
+| CPA 运行平台 | 选择的附件后缀 | 解压后的库 |
+| --- | --- | --- |
+| Linux / Docker，Intel 或 AMD 64 位 | `_linux_amd64.zip` | `request-recorder.so` |
+| Linux / Docker，ARM64（如树莓派 64 位） | `_linux_arm64.zip` | `request-recorder.so` |
+| macOS Intel | `_darwin_amd64.zip` | `request-recorder.dylib` |
+| macOS Apple Silicon | `_darwin_arm64.zip` | `request-recorder.dylib` |
+| Windows x64 | `_windows_amd64.zip` | `request-recorder.dll` |
+
+Linux 包在 Debian 12 / glibc 环境原生编译，匹配所检查 CPA Dockerfile 的系统基线；Alpine / musl 和 Windows ARM64 不包含在这五种发布目标中。Docker 部署应按 **容器内部** 的 OS / 架构选择，不是按浏览器或宿主桌面系统选择。
+
+以 Linux amd64 的 `v0.1.0` 为例（先确认该版本已经在 Releases 生成）：
+
+1. 下载 `request-recorder_0.1.0_linux_amd64.zip` 和 `checksums.txt`，放在同一目录。
+2. 校验并解压到 CPA 的插件目录：
+
+   ```bash
+   sha256sum --ignore-missing --check checksums.txt
+   mkdir -p /path/to/CLIProxyAPI/plugins/linux/amd64
+   unzip request-recorder_0.1.0_linux_amd64.zip -d /path/to/CLIProxyAPI/plugins/linux/amd64
+   ```
+
+3. 合并下面的插件配置，设置数据库与真实日志目录，然后重启 CPA。
+4. CPAMC 中确认插件 `effective_enabled`，打开“插件资源 → 请求记录”，输入 CPA **管理密钥**。
+5. 发一条测试模型请求。请求结束后刷新列表，检查“上游原文”是否已采集。若不可用，在详情中查看补全原因。
+
+不需要部署独立网站，GUI 已包含在动态库中。该仓库目前没有注册进官方插件商店，不能假定商店搜索或粘贴仓库地址就能自动安装。
+
+### Docker / Compose 路径示例
+
+在现有 CPA 服务中追加目录挂载（不要覆盖原有配置、auth 等挂载）：
+
+```yaml
+volumes:
+  - ./plugins:/CLIProxyAPI/plugins
+  - ./recorder-data:/CLIProxyAPI/recorder-data
+  - ./logs:/CLIProxyAPI/logs
+```
+
+将库放在宿主机 `./plugins/linux/amd64/request-recorder.so`（ARM64 则用 `arm64` 子目录）。插件配置使用容器内路径：
+
+```yaml
+request-log: true
+usage-statistics-enabled: true
+plugins:
+  enabled: true
+  dir: /CLIProxyAPI/plugins
+  configs:
+    request-recorder:
+      enabled: true
+      priority: -1000
+      db_path: /CLIProxyAPI/recorder-data/request-recorder.db
+      logs_dir: /CLIProxyAPI/logs
+```
+
+示例假设 CPA 的工作目录和实际请求日志位于 `/CLIProxyAPI`。如果你的镜像使用其他工作目录或 `WRITABLE_PATH`，按实际路径修改。目录要允许容器内 CPA 用户写入。数据库挂载用于保留记录，重建容器后也需要保留。
+
+### 维护者发布新版本
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+工作流将 Go / JS 检查、发布脚本测试和五个平台的原生构建作为发布前置条件。每个 zip 根目录只有一个动态库，Release 附带统一 `checksums.txt`；库的版本号通过链接参数从标签写入。构建失败不会发布 Release。预发布标签如 `v0.2.0-rc.1` 会标为 prerelease。手动运行只生成 `0.0.0-dev` 构建，已有正式 Release 不会被自动覆盖。不需要另设 PAT，发布 job 使用仓库自带的 `GITHUB_TOKEN`。
+
 ## 构建和安装
 
 需要 Go **1.26.10+**、目标平台 C 编译器和 `make`。Go module 校验和及 TLS 验证保持开启。
