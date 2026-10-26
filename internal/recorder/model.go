@@ -11,40 +11,44 @@ import (
 )
 
 type Summary struct {
-	LatestPrompt    string       `json:"latest_prompt"`
-	LatestResponse  string       `json:"latest_response"`
-	ID              string       `json:"id"`
-	TraceID         string       `json:"trace_id"`
-	StartedAt       time.Time    `json:"started_at"`
-	CompletedAt     time.Time    `json:"completed_at"`
-	Outcome         string       `json:"outcome"`
-	Status          int          `json:"status"`
-	Format          string       `json:"format"`
-	Stream          bool         `json:"stream"`
-	KeyID           string       `json:"key_id"`
-	KeyHint         string       `json:"key_hint"`
-	KeyAlias        string       `json:"key_alias"`
-	CallerScope     string       `json:"caller_scope"`
-	ClientIP        string       `json:"client_ip"`
-	UserAgent       string       `json:"user_agent"`
-	SessionID       string       `json:"session_id"`
-	ParentSessionID string       `json:"parent_session_id"`
-	Provider        string       `json:"provider"`
-	RequestedModel  string       `json:"requested_model"`
-	Model           string       `json:"model"`
-	ResponseModel   string       `json:"response_model"`
-	ReasoningEffort string       `json:"reasoning_effort"`
-	ServiceTier     string       `json:"service_tier"`
-	AuthID          string       `json:"auth_id"`
-	DurationMS      float64      `json:"duration_ms"`
-	TTFTMS          *float64     `json:"ttft_ms"`
-	FirstChunkMS    *float64     `json:"first_chunk_ms"`
-	Tokens          *wire.Tokens `json:"tokens"`
-	CacheRatio      *float64     `json:"cache_ratio"`
-	UpstreamState   string       `json:"upstream_state"`
-	Warnings        []string     `json:"warnings"`
+	RequestID             string       `json:"request_id"`
+	ConversationStartedAt time.Time    `json:"conversation_started_at"`
+	ConversationTurns     int          `json:"conversation_turns"`
+	LatestPrompt          string       `json:"latest_prompt"`
+	LatestResponseSource  string       `json:"latest_response_source,omitempty"`
+	LatestResponse        string       `json:"latest_response"`
+	ID                    string       `json:"id"`
+	TraceID               string       `json:"trace_id"`
+	StartedAt             time.Time    `json:"started_at"`
+	CompletedAt           time.Time    `json:"completed_at"`
+	Outcome               string       `json:"outcome"`
+	Status                int          `json:"status"`
+	Format                string       `json:"format"`
+	Stream                bool         `json:"stream"`
+	KeyID                 string       `json:"key_id"`
+	KeyHint               string       `json:"key_hint"`
+	KeyAlias              string       `json:"key_alias"`
+	CallerScope           string       `json:"caller_scope"`
+	UserAgent             string       `json:"user_agent"`
+	SessionID             string       `json:"session_id"`
+	ParentSessionID       string       `json:"parent_session_id"`
+	Provider              string       `json:"provider"`
+	RequestedModel        string       `json:"requested_model"`
+	Model                 string       `json:"model"`
+	ResponseModel         string       `json:"response_model"`
+	ReasoningEffort       string       `json:"reasoning_effort"`
+	ServiceTier           string       `json:"service_tier"`
+	AuthID                string       `json:"auth_id"`
+	DurationMS            float64      `json:"duration_ms"`
+	TTFTMS                *float64     `json:"ttft_ms"`
+	FirstChunkMS          *float64     `json:"first_chunk_ms"`
+	Tokens                *wire.Tokens `json:"tokens"`
+	CacheRatio            *float64     `json:"cache_ratio"`
+	UpstreamState         string       `json:"upstream_state"`
+	Warnings              []string     `json:"warnings"`
 }
 type Record struct {
+	ConversationHistory string `json:"conversation_history"`
 	Summary
 	UpstreamAttempt   int            `json:"upstream_attempt"`
 	Images            []ImageAsset   `json:"images,omitempty"`

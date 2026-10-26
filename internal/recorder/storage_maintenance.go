@@ -21,6 +21,9 @@ func (s *Store) view(fn func(*bolt.Tx) error) error {
 func (s *Store) update(cost int, fn func(*bolt.Tx) error) error {
 	s.writes.Lock()
 	defer s.writes.Unlock()
+	return s.updateLocked(cost, fn)
+}
+func (s *Store) updateLocked(cost int, fn func(*bolt.Tx) error) error {
 	s.mu.RLock()
 	err := s.db.Update(fn)
 	s.mu.RUnlock()
@@ -69,7 +72,7 @@ func (s *Store) storageQuick() map[string]any {
 	s.maintenance.Lock()
 	running, lastError := s.running, s.lastMaintenanceError
 	s.maintenance.Unlock()
-	return map[string]any{"database_file_bytes": size.File, "database_free_page_bytes": size.Free, "database_storage_format": "final-snapshot-chunks-v1", "max_database_bytes": s.limit, "capacity_evicted_records": size.Evicted, "database_maintenance_running": running, "database_maintenance_error": lastError}
+	return map[string]any{"database_file_bytes": size.File, "database_free_page_bytes": size.Free, "database_storage_format": "conversation-v1/chunks-v1", "max_database_bytes": s.limit, "capacity_evicted_records": size.Evicted, "database_maintenance_running": running, "database_maintenance_error": lastError}
 }
 func (s *Store) StorageStats() (map[string]any, error) {
 	result := s.storageQuick()
@@ -184,6 +187,14 @@ func (s *Store) enforceCapacity() error {
 	return nil
 }
 func removeStoredRecord(tx *bolt.Tx, id []byte, summary Summary) error {
+	if err := clearConversationKeys(tx, id); err != nil {
+		return err
+	}
+	if summary.RequestID != "" && string(tx.Bucket(requestRecords).Get([]byte(summary.RequestID))) == string(id) {
+		if err := tx.Bucket(requestRecords).Delete([]byte(summary.RequestID)); err != nil {
+			return err
+		}
+	}
 	ids, err := storedChunkIDs(tx.Bucket(records).Get(id))
 	if err != nil {
 		return err

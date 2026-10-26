@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -46,10 +47,11 @@ func imageDirectory(cfg Config) string {
 	return filepath.Join(filepath.Dir(cfg.DBPath), base+"-images")
 }
 
-var cacheImageName = regexp.MustCompile(`^[a-f0-9]{64}\.img$`)
+var cacheImageName = regexp.MustCompile(`^[a-f0-9]{64}\.(png|jpg|gif|webp|bmp|avif|img)$`)
 var cacheTempName = regexp.MustCompile(`^\.rr-tmp-[a-f0-9]{32}$`)
 
 type imageArchive struct {
+	previews   *previewCache
 	sizes      map[string]int64
 	store      *Store
 	root       *os.Root
@@ -78,7 +80,7 @@ func newImageArchive(cfg Config, store *Store) (*imageArchive, error) {
 		return nil, err
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	a := &imageArchive{sizes: map[string]int64{}, store: store, root: root, cfg: cfg, fetcher: newImageFetcher(), ctx: ctx, cancel: cancel, queue: make(chan string, 256), jobs: map[string]bool{}, processing: map[string]bool{}, retries: map[string]bool{}, serving: make(chan struct{}, 2)}
+	a := &imageArchive{previews: newPreviewCache(), sizes: map[string]int64{}, store: store, root: root, cfg: cfg, fetcher: newImageFetcher(), ctx: ctx, cancel: cancel, queue: make(chan string, 256), jobs: map[string]bool{}, processing: map[string]bool{}, retries: map[string]bool{}, serving: make(chan struct{}, 2)}
 	f, err := root.Open(".")
 	if err != nil {
 		root.Close()
@@ -99,9 +101,20 @@ func newImageArchive(cfg Config, store *Store) (*imageArchive, error) {
 				continue
 			}
 			if cacheImageName.MatchString(entry.Name()) {
-				if info, err := entry.Info(); err == nil {
+				name := entry.Name()
+				if strings.HasSuffix(name, ".img") {
+					if renamed, err := a.renameImageExtension(name); err == nil {
+						name = renamed
+					} else {
+						log.Printf("request-recorder: image filename update failed: %v", err)
+					}
+				}
+				if _, counted := a.sizes[name]; counted {
+					continue
+				}
+				if info, err := root.Lstat(name); err == nil && info.Mode().IsRegular() {
 					a.used += info.Size()
-					a.sizes[strings.TrimSuffix(entry.Name(), ".img")] = info.Size()
+					a.sizes[name] = info.Size()
 				}
 			}
 		}
@@ -195,7 +208,7 @@ type imageSource struct{ id, url string }
 func recordImageSources(r *Record, limit int) []imageSource {
 	sources := []imageSource{}
 	seen := map[string]bool{}
-	msgs := Conversation(r.RequestBody, r.ResponseBody)
+	msgs := conversationMessages(r)
 	if r.InterceptedBody != "" && r.InterceptedBody != r.RequestBody {
 		msgs = append(msgs, Conversation(r.InterceptedBody, "")...)
 	}
@@ -248,7 +261,7 @@ func (a *imageArchive) process(id string) bool {
 			asset.Status = "pending"
 			asset.Error = ""
 		}
-		if asset.Status == "ready" && !a.exists(asset.Hash) {
+		if asset.Status == "ready" && !a.exists(asset) {
 			asset.Status = "pending"
 			asset.Error = ""
 		}
@@ -301,17 +314,74 @@ func (a *imageArchive) process(id string) bool {
 	return true
 }
 
-func (a *imageArchive) exists(hash string) bool {
-	if !validSHA256(hash) {
+func imageExtension(mime string) string {
+	return map[string]string{"image/png": "png", "image/jpeg": "jpg", "image/gif": "gif", "image/webp": "webp", "image/bmp": "bmp", "image/avif": "avif"}[mime]
+}
+func imageFileName(asset ImageAsset) string {
+	if !validSHA256(asset.Hash) || imageExtension(asset.MIME) == "" {
+		return ""
+	}
+	return asset.Hash + "." + imageExtension(asset.MIME)
+}
+
+// Existing .img archives contain original bytes. Rename only owned filenames;
+// sniff the payload instead of trusting a URL suffix or response Content-Type.
+func (a *imageArchive) renameImageExtension(old string) (string, error) {
+	f, err := a.root.Open(old)
+	if err != nil {
+		return old, err
+	}
+	header, err := io.ReadAll(io.LimitReader(f, 512))
+	f.Close()
+	if err != nil {
+		return old, err
+	}
+	hash := strings.TrimSuffix(old, ".img")
+	name := imageFileName(ImageAsset{Hash: hash, MIME: sniffImageMIME(header)})
+	if name == "" {
+		return old, errors.New("existing image format is unrecognized")
+	}
+	if info, err := a.root.Lstat(name); err == nil {
+		if !info.Mode().IsRegular() {
+			return old, errors.New("image destination is not a regular file")
+		}
+		existing, err := a.root.Open(name)
+		if err != nil {
+			return old, err
+		}
+		data, err := io.ReadAll(io.LimitReader(existing, a.cfg.MaxImageBytes+1))
+		existing.Close()
+		if err != nil || imageBytesID(data) != hash {
+			return old, errors.New("image destination integrity check failed")
+		}
+		if err := a.root.Remove(old); err != nil {
+			return old, err
+		}
+		return name, nil
+	} else if !os.IsNotExist(err) {
+		return old, err
+	}
+	if err := a.root.Rename(old, name); err != nil {
+		return old, err
+	}
+	return name, nil
+}
+func (a *imageArchive) exists(asset ImageAsset) bool {
+	name := imageFileName(asset)
+	if name == "" {
 		return false
 	}
-	info, err := a.root.Lstat(hash + ".img")
+	info, err := a.root.Lstat(name)
 	return err == nil && info.Mode().IsRegular()
 }
 func (a *imageArchive) put(data []byte) (string, error) {
 	sum := sha256.Sum256(data)
 	hash := hex.EncodeToString(sum[:])
-	name := hash + ".img"
+	mime, err := imageMIME(data)
+	if err != nil {
+		return "", err
+	}
+	name := imageFileName(ImageAsset{Hash: hash, MIME: mime})
 	a.filesMu.Lock()
 	defer a.filesMu.Unlock()
 	if info, err := a.root.Lstat(name); err == nil {
@@ -325,17 +395,19 @@ func (a *imageArchive) put(data []byte) (string, error) {
 			oldFile.Close()
 		}
 		if err == nil && imageBytesID(old) == hash {
+			now := time.Now()
+			_ = a.root.Chtimes(name, now, now) // protect the write-to-reference GC grace period
 			return hash, nil
 		}
 		if err := a.root.Remove(name); err != nil {
 			return "", errors.New("无法替换损坏的图片")
 		}
-		a.used -= a.sizes[hash]
-		delete(a.sizes, hash)
+		a.used -= a.sizes[name]
+		delete(a.sizes, name)
 	}
 	if _, err := a.root.Lstat(name); os.IsNotExist(err) {
-		a.used -= a.sizes[hash]
-		delete(a.sizes, hash)
+		a.used -= a.sizes[name]
+		delete(a.sizes, name)
 	}
 	if len(a.sizes) >= a.cfg.MaxImageFiles {
 		return "", errors.New("图片文件数达到上限，请清理过期记录或增大配额")
@@ -368,11 +440,12 @@ func (a *imageArchive) put(data []byte) (string, error) {
 		return "", errors.New("无法提交图片文件")
 	}
 	a.used += int64(len(data))
-	a.sizes[hash] = int64(len(data))
+	a.sizes[name] = int64(len(data))
 	return hash, nil
 }
 func (a *imageArchive) read(asset ImageAsset) ([]byte, error) {
-	if !validSHA256(asset.Hash) || asset.Size < 1 || asset.Size > a.cfg.MaxImageBytes {
+	name := imageFileName(asset)
+	if name == "" || asset.Size < 1 || asset.Size > a.cfg.MaxImageBytes {
 		return nil, errors.New("无效图片元数据")
 	}
 	select {
@@ -383,11 +456,11 @@ func (a *imageArchive) read(asset ImageAsset) ([]byte, error) {
 	}
 	a.filesMu.Lock()
 	defer a.filesMu.Unlock()
-	info, err := a.root.Lstat(asset.Hash + ".img")
+	info, err := a.root.Lstat(name)
 	if err != nil || !info.Mode().IsRegular() {
 		return nil, errors.New("图片文件不可用")
 	}
-	f, err := a.root.Open(asset.Hash + ".img")
+	f, err := a.root.Open(name)
 	if err != nil {
 		return nil, errors.New("图片文件不可用")
 	}
@@ -425,7 +498,7 @@ func (a *imageArchive) collect(before time.Time) error {
 		if !entry.Type().IsRegular() || !cacheImageName.MatchString(entry.Name()) {
 			continue
 		}
-		hash := strings.TrimSuffix(entry.Name(), ".img")
+		hash := strings.SplitN(entry.Name(), ".", 2)[0]
 		if refs[hash] {
 			continue
 		}
@@ -439,8 +512,8 @@ func (a *imageArchive) collect(before time.Time) error {
 		if err := a.root.Remove(entry.Name()); err != nil {
 			return err
 		}
-		a.used -= a.sizes[hash]
-		delete(a.sizes, hash)
+		a.used -= a.sizes[entry.Name()]
+		delete(a.sizes, entry.Name())
 	}
 	return nil
 }
@@ -500,7 +573,7 @@ func (a *imageArchive) status() map[string]any {
 	return map[string]any{"images_dir": imageDirectory(a.cfg), "image_storage_bytes": used, "max_image_files": a.cfg.MaxImageFiles, "max_image_storage_bytes": a.cfg.MaxImageStorageBytes, "pending_image_records": jobs, "max_image_bytes": a.cfg.MaxImageBytes}
 }
 func imageDownloadName(asset ImageAsset) string {
-	ext := map[string]string{"image/png": "png", "image/jpeg": "jpg", "image/gif": "gif", "image/webp": "webp", "image/bmp": "bmp", "image/avif": "avif"}[asset.MIME]
+	ext := imageExtension(asset.MIME)
 	return fmt.Sprintf("%s.%s", asset.ID, ext)
 }
 

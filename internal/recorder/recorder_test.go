@@ -94,6 +94,26 @@ func TestStreamingBeyondHostHistoryAndCancellation(t *testing.T) {
 		t.Fatal(c)
 	}
 }
+
+func TestBareJSONStreamCallbacksMergeWithoutRequestLogs(t *testing.T) {
+	e := testEngine(t)
+	check(t, e.Request(wire.Request{RequestID: "bare", Stream: true, Body: []byte(`{"messages":[{"role":"user","content":"question"}]}`)}, false))
+	for i := 0; i < 160; i++ {
+		payload := fmt.Sprintf(`{"id":"resp_bare","choices":[{"index":0,"delta":{"content":"%d,"}}]}`, i)
+		check(t, e.Response(wire.Response{RequestID: "bare", ChunkIndex: i, Body: []byte(payload)}, true))
+	}
+	check(t, e.Response(wire.Response{RequestID: "bare", ChunkIndex: 160, Body: []byte("[DONE]")}, true))
+	check(t, e.Usage(wire.Usage{RequestID: "bare", APIKey: "client"}))
+	check(t, e.Complete(wire.Completion{RequestID: "bare", Outcome: "succeeded"}))
+	r, err := e.Get("bare")
+	check(t, err)
+	if e.cfg.LogsDir != "" || r.LatestResponseSource != "cpa_response" || !strings.HasPrefix(r.LatestResponse, "0,1,2,") || strings.Contains(r.ResponseBody, "data:") || !strings.Contains(r.ResponseBody, "159,") {
+		t.Fatalf("bare JSON was not assembled: %+v %s", r.Summary, r.ResponseBody)
+	}
+	if len(conversationMessages(r)) != 2 || !strings.Contains(r.ConversationHistory, "159,") {
+		t.Fatal("missing stream answer in history", r.ConversationHistory)
+	}
+}
 func TestConcurrentRequestsNeverCrossContaminate(t *testing.T) {
 	e := testEngine(t)
 	var wg sync.WaitGroup

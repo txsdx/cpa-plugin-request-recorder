@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"image"
 	"image/color"
+	"image/gif"
+	"image/jpeg"
 	"image/png"
 	"io"
 	"net"
@@ -193,7 +195,7 @@ func TestImageArchivePersistenceMembershipQuotaAndCleanup(t *testing.T) {
 	if !bytes.Equal(original, archived) {
 		t.Fatal("image was transformed")
 	}
-	path := filepath.Join(imageDirectory(e.cfg), assets[0].Hash+".img")
+	path := filepath.Join(imageDirectory(e.cfg), assets[0].Hash+".png")
 	if _, err := os.Stat(path); err != nil {
 		t.Fatal(err)
 	}
@@ -319,7 +321,7 @@ func TestArchivedImageRepairAndDownloadFailureRemainPrivate(t *testing.T) {
 	check(t, e.store.Save(r))
 	e.images.enqueue(r.ID)
 	assets := awaitAssets(t, e.store, r.ID)
-	path := filepath.Join(imageDirectory(e.cfg), assets[0].Hash+".img")
+	path := filepath.Join(imageDirectory(e.cfg), assets[0].Hash+".png")
 	check(t, os.WriteFile(path, []byte("corrupted"), 0600))
 	req := wire.ManagementRequest{Method: "GET", Path: APIBase + "/image", Query: map[string][]string{"record_id": {r.ID}, "id": {assets[0].ID}}}
 	if got := e.Management(req, web.Files); got.StatusCode != 410 {
@@ -405,5 +407,70 @@ func TestImageDiscoveryIncludesFinalUpstreamRequestAndResponse(t *testing.T) {
 	r.UpstreamResponses = `{"data":[{"url":"https://example.com/final-output.png"}]}`
 	if sources := recordImageSources(r, 64); len(sources) != 3 {
 		t.Fatal(sources)
+	}
+}
+
+func TestArchiveUsesPayloadExtensionAndRenamesExistingIMG(t *testing.T) {
+	data := imageFixture(t)
+	cfg := DefaultConfig()
+	cfg.DBPath = filepath.Join(t.TempDir(), "existing.db")
+	dir := imageDirectory(cfg)
+	check(t, os.MkdirAll(dir, 0700))
+	hash := imageBytesID(data)
+	old := filepath.Join(dir, hash+".img")
+	check(t, os.WriteFile(old, data, 0600))
+	// A copy with the correct extension may already exist after a partial rename.
+	check(t, os.WriteFile(filepath.Join(dir, hash+".png"), data, 0600))
+	e, err := New(cfg)
+	check(t, err)
+	defer e.Close()
+	if _, err := os.Stat(old); !os.IsNotExist(err) {
+		t.Fatal(".img was not renamed/deduplicated")
+	}
+	if e.images.used != int64(len(data)) || len(e.images.sizes) != 1 {
+		t.Fatal("archive accounting duplicated files")
+	}
+	// The declared MIME is deliberately wrong: actual PNG bytes control the suffix.
+	source := "data:image/jpeg;base64," + base64.StdEncoding.EncodeToString(data)
+	r := recordWithImage("actual-png", source)
+	check(t, e.store.Save(r))
+	e.images.enqueue(r.ID)
+	assets := awaitAssets(t, e.store, r.ID)
+	if assets[0].MIME != "image/png" || imageFileName(assets[0]) != hash+".png" {
+		t.Fatal(assets)
+	}
+	actual, err := os.ReadFile(filepath.Join(dir, imageFileName(assets[0])))
+	check(t, err)
+	if !bytes.Equal(data, actual) {
+		t.Fatal("rename transformed original bytes")
+	}
+}
+
+func TestOriginalJPEGAndGIFExtensionsAndGCGrace(t *testing.T) {
+	e := testEngine(t)
+	m := image.NewRGBA(image.Rect(0, 0, 8, 8))
+	var jpg, gifData bytes.Buffer
+	check(t, jpeg.Encode(&jpg, m, nil))
+	check(t, gif.Encode(&gifData, m, nil))
+	for _, fixture := range []struct {
+		data []byte
+		ext  string
+	}{{jpg.Bytes(), ".jpg"}, {gifData.Bytes(), ".gif"}} {
+		hash, err := e.images.put(fixture.data)
+		check(t, err)
+		path := filepath.Join(imageDirectory(e.cfg), hash+fixture.ext)
+		actual, err := os.ReadFile(path)
+		check(t, err)
+		if !bytes.Equal(actual, fixture.data) {
+			t.Fatal("image transcoded")
+		}
+		past := time.Now().Add(-time.Hour)
+		check(t, os.Chtimes(path, past, past))
+		_, err = e.images.put(fixture.data)
+		check(t, err)
+		check(t, e.images.collect(time.Now().Add(-5*time.Minute)))
+		if _, err := os.Stat(path); err != nil {
+			t.Fatal("deduplicated image lost before reference could be saved", err)
+		}
 	}
 }

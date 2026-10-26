@@ -152,6 +152,9 @@ func (e *Engine) enrich(id string, j *logJob) {
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	if e.jobs[id] != j {
+		return
+	}
 	r, getErr := e.store.Get(id)
 	if getErr != nil {
 		if !errors.Is(getErr, ErrNotFound) {

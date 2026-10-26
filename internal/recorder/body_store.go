@@ -32,7 +32,7 @@ type storedRecord struct {
 }
 
 func recordBodyFields(r *Record) map[string]*string {
-	return map[string]*string{"request_body": &r.RequestBody, "intercepted_body": &r.InterceptedBody, "response_body": &r.ResponseBody, "upstream_requests": &r.UpstreamRequests, "upstream_responses": &r.UpstreamResponses}
+	return map[string]*string{"conversation_history": &r.ConversationHistory, "request_body": &r.RequestBody, "intercepted_body": &r.InterceptedBody, "response_body": &r.ResponseBody, "upstream_requests": &r.UpstreamRequests, "upstream_responses": &r.UpstreamResponses}
 }
 
 // A content-defined boundary realigns after insertions. Shared conversation

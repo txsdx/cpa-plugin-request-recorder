@@ -18,6 +18,10 @@ concurrency:
   group: release
   cancel-in-progress: false
 
+# Bundle the image decoder; no system codec library is required.
+env:
+  GOFLAGS: -tags=nodynamic
+
 jobs:
   validate:
     runs-on: ubuntu-24.04
@@ -148,8 +152,47 @@ jobs:
           path: dist/*.zip
           if-no-files-found: error
 
+  runtime:
+    name: Real CPA capture with and without request-log
+    needs: [validate, linux]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/checkout@v5
+        with:
+          repository: router-for-me/CLIProxyAPI
+          ref: 307803510bce87f986fcf7b1a84190f105c7b4aa
+          path: cpa-source
+          persist-credentials: false
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: |
+            go.sum
+            cpa-source/go.sum
+      - uses: actions/download-artifact@v4
+        with:
+          name: plugin-linux-amd64
+          path: dist
+      - name: Extract tested native plugin
+        env:
+          VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          python3 - <<'PYTHON'
+          import os, zipfile
+          with zipfile.ZipFile('dist/request-recorder_' + os.environ['VERSION'] + '_linux_amd64.zip') as archive:
+              archive.extract('request-recorder.so', 'dist')
+          PYTHON
+      - name: Build pinned CPA host
+        working-directory: cpa-source
+        run: go build -o "$RUNNER_TEMP/recorder-cpa-host" ./cmd/server
+      - name: Verify complete conversations and original images
+        run: |
+          CPA_BIN="$RUNNER_TEMP/recorder-cpa-host" python3 scripts/integration.py
+          RECORDER_TEST_LOGS=0 CPA_BIN="$RUNNER_TEMP/recorder-cpa-host" python3 scripts/integration.py
+
   publish:
-    needs: [validate, linux, desktop]
+    needs: [validate, linux, desktop, runtime]
     runs-on: ubuntu-24.04
     permissions:
       contents: write

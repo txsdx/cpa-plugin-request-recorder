@@ -43,6 +43,7 @@ type Store struct {
 	journal              *mutationJournal
 	db                   *bolt.DB
 	limit                int64
+	historyLimit         int
 	lastMaintenanceError string
 }
 
@@ -58,17 +59,17 @@ func Open(path string) (*Store, error) {
 		return nil, err
 	}
 	db.AllocSize = 64 << 10
-	s := &Store{db: db, limit: 1 << 30}
+	s := &Store{db: db, limit: 1 << 30, historyLimit: 64 << 20}
 	err = db.Update(func(tx *bolt.Tx) error {
-		if tx.Bucket(storageMeta) == nil && tx.Bucket(records) != nil && tx.Bucket(records).Stats().KeyN > 0 {
+		if tx.Bucket(records) != nil && tx.Bucket(records).Stats().KeyN > 0 && (tx.Bucket(storageMeta) == nil || string(tx.Bucket(storageMeta).Get([]byte("record_layout"))) != "conversation-v1") {
 			return errors.New("旧数据库格式不再支持，请停止 CPA 并移走旧数据库后重启")
 		}
-		for _, name := range [][]byte{records, summaries, ordering, aliases, panelAliases, traces, imageAssets, imageJobs, bodyChunks, bodyCounts, storageMeta} {
+		for _, name := range [][]byte{records, summaries, ordering, aliases, panelAliases, traces, imageAssets, imageJobs, bodyChunks, bodyCounts, storageMeta, conversationKeys, conversationAliases, requestRecords} {
 			if _, e := tx.CreateBucketIfNotExists(name); e != nil {
 				return e
 			}
 		}
-		return nil
+		return tx.Bucket(storageMeta).Put([]byte("record_layout"), []byte("conversation-v1"))
 	})
 	if err != nil {
 		db.Close()
@@ -86,7 +87,19 @@ func (s *Store) Close() error {
 	return s.db.Close()
 }
 func orderKey(r Summary) []byte { return []byte(fmt.Sprintf("%020d:%s", r.StartedAt.UnixNano(), r.ID)) }
-func (s *Store) Save(r *Record) error {
+func (s *Store) Save(input *Record) error {
+	s.writes.Lock()
+	defer s.writes.Unlock()
+	originalID, originalRequestID := input.ID, input.RequestID
+	if originalRequestID == "" {
+		originalRequestID = originalID
+	}
+	snapshot := *input
+	r := &snapshot
+	keys, err := s.prepareConversation(r)
+	if err != nil {
+		return err
+	}
 	stored, chunks := prepareStoredRecord(r)
 	raw, err := json.Marshal(&stored)
 	if err != nil {
@@ -96,7 +109,7 @@ func (s *Store) Save(r *Record) error {
 	if err != nil {
 		return err
 	}
-	// Compress only new chunks and do expensive work outside the write lock.
+	// Compress before the write transaction; readers remain available.
 	encoded := map[string][]byte{}
 	err = s.view(func(tx *bolt.Tx) error {
 		for id, body := range chunks {
@@ -118,7 +131,7 @@ func (s *Store) Save(r *Record) error {
 		cost += len(*body)
 	}
 	r = &stored.Record // immutable metadata captured for compaction replay
-	return s.update(cost, func(tx *bolt.Tx) error {
+	err = s.updateLocked(cost, func(tx *bolt.Tx) error {
 		id := []byte(r.ID)
 		oldIDs, err := storedChunkIDs(tx.Bucket(records).Get(id))
 		if err != nil {
@@ -173,6 +186,11 @@ func (s *Store) Save(r *Record) error {
 			if err := tx.Bucket(ordering).Delete(orderKey(o)); err != nil {
 				return err
 			}
+			if o.RequestID != r.RequestID && o.RequestID != "" {
+				if err := tx.Bucket(requestRecords).Delete([]byte(o.RequestID)); err != nil {
+					return err
+				}
+			}
 			if o.TraceID != r.TraceID {
 				if err := tx.Bucket(traces).Delete([]byte(o.TraceID + "\x00" + o.ID)); err != nil {
 					return err
@@ -188,13 +206,42 @@ func (s *Store) Save(r *Record) error {
 		if err := tx.Bucket(summaries).Put(id, sum); err != nil {
 			return err
 		}
+		if originalID != r.ID {
+			if old := tx.Bucket(summaries).Get([]byte(originalID)); old != nil {
+				var obsolete Summary
+				if err := json.Unmarshal(old, &obsolete); err != nil {
+					return err
+				}
+				if obsolete.RequestID == originalRequestID && (obsolete.KeyID == "" || obsolete.KeyID == r.KeyID) {
+					if err := mergeImageInventory(tx, []byte(originalID), id); err != nil {
+						return err
+					}
+					if err := removeStoredRecord(tx, []byte(originalID), obsolete); err != nil {
+						return err
+					}
+				}
+			}
+		}
+		if err := saveConversationKeys(tx, r, keys); err != nil {
+			return err
+		}
 		return tx.Bucket(ordering).Put(orderKey(r.Summary), id)
 	})
+	if err == nil {
+		*input = snapshot
+	}
+	return err
 }
 func (s *Store) Get(id string) (*Record, error) {
 	var r *Record
 	err := s.view(func(tx *bolt.Tx) error {
 		b := tx.Bucket(records).Get([]byte(id))
+		if b == nil {
+			if actual := tx.Bucket(requestRecords).Get([]byte(id)); actual != nil {
+				id = string(actual)
+				b = tx.Bucket(records).Get(actual)
+			}
+		}
 		if b == nil {
 			return ErrNotFound
 		}
@@ -215,10 +262,10 @@ func (s *Store) Get(id string) (*Record, error) {
 }
 
 type Filter struct {
-	Query, KeyID, Alias, IP, Model, Provider, Outcome, Session, Reasoning string
-	From, To                                                              time.Time
-	MinDuration                                                           float64
-	Offset, Limit                                                         int
+	Query, KeyID, Alias, Model, Provider, Outcome, Session, Reasoning string
+	From, To                                                          time.Time
+	MinDuration                                                       float64
+	Offset, Limit                                                     int
 }
 type Page struct {
 	Items  []Summary `json:"items"`
@@ -253,13 +300,13 @@ func (s *Store) List(f Filter) (Page, error) {
 				continue
 			}
 			match := true
-			for _, pair := range [][2]string{{r.KeyAlias, f.Alias}, {r.ClientIP, f.IP}, {r.Model + " " + r.RequestedModel + " " + r.ResponseModel, f.Model}, {r.Provider, f.Provider}, {r.ReasoningEffort, f.Reasoning}} {
+			for _, pair := range [][2]string{{r.KeyAlias, f.Alias}, {r.Model + " " + r.RequestedModel + " " + r.ResponseModel, f.Model}, {r.Provider, f.Provider}, {r.ReasoningEffort, f.Reasoning}} {
 				if !contains(pair[0], pair[1]) {
 					match = false
 					break
 				}
 			}
-			if !match || !contains(strings.Join([]string{r.ID, r.TraceID, r.KeyAlias, r.KeyHint, r.KeyID, r.CallerScope, r.ClientIP, r.Model, r.RequestedModel, r.ResponseModel, r.Provider, r.SessionID, r.UserAgent, r.LatestPrompt, r.LatestResponse}, " "), f.Query) {
+			if !match || !contains(strings.Join([]string{r.ID, r.TraceID, r.KeyAlias, r.KeyHint, r.KeyID, r.CallerScope, r.Model, r.RequestedModel, r.ResponseModel, r.Provider, r.SessionID, r.UserAgent, r.LatestPrompt, r.LatestResponse}, " "), f.Query) {
 				continue
 			}
 			if p.Total >= f.Offset && len(p.Items) < f.Limit {
@@ -289,45 +336,23 @@ func (s *Store) SetAlias(id, alias string) error {
 }
 func (s *Store) Prune(days, max int) error {
 	cutoff := time.Now().AddDate(0, 0, -days)
-	return s.update(0, func(tx *bolt.Tx) error {
-		b := tx.Bucket(ordering)
-		count := b.Stats().KeyN
-		c := b.Cursor()
-		for k, v := c.First(); k != nil; k, v = c.Next() {
-			var r Summary
-			if e := json.Unmarshal(tx.Bucket(summaries).Get(v), &r); e != nil {
-				return e
-			}
-			if (days <= 0 || !r.StartedAt.Before(cutoff)) && (max <= 0 || count <= max) {
+	return s.update(4096, func(tx *bolt.Tx) error {
+		count := tx.Bucket(ordering).Stats().KeyN
+		for {
+			_, id := tx.Bucket(ordering).Cursor().First()
+			if id == nil {
 				break
 			}
-			id := append([]byte(nil), v...)
-			chunkIDs, err := storedChunkIDs(tx.Bucket(records).Get(id))
-			if err != nil {
+			id = append([]byte(nil), id...)
+			var summary Summary
+			if err := json.Unmarshal(tx.Bucket(summaries).Get(id), &summary); err != nil {
 				return err
 			}
-			for chunkID := range chunkIDs {
-				if err := releaseBodyChunk(tx, chunkID); err != nil {
-					return err
-				}
+			if (days <= 0 || !summary.StartedAt.Before(cutoff)) && (max <= 0 || count <= max) {
+				break
 			}
-			if err := tx.Bucket(imageJobs).Delete(id); err != nil {
+			if err := removeStoredRecord(tx, id, summary); err != nil {
 				return err
-			}
-			if err := tx.Bucket(imageAssets).Delete(id); err != nil {
-				return err
-			}
-			if err := tx.Bucket(traces).Delete([]byte(r.TraceID + "\x00" + r.ID)); err != nil {
-				return err
-			}
-			if e := tx.Bucket(records).Delete(id); e != nil {
-				return e
-			}
-			if e := tx.Bucket(summaries).Delete(id); e != nil {
-				return e
-			}
-			if e := c.Delete(); e != nil {
-				return e
 			}
 			count--
 		}

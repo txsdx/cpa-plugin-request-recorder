@@ -285,8 +285,18 @@ func inlineImage(raw string, max int64) ([]byte, string, error) {
 	mime, err := imageMIME(data)
 	return data, mime, err
 }
-func imageMIME(data []byte) (string, error) {
+func sniffImageMIME(data []byte) string {
 	mime := http.DetectContentType(data)
+	if imageExtension(mime) != "" {
+		return mime
+	}
+	if len(data) >= 16 && string(data[4:8]) == "ftyp" && (string(data[8:12]) == "avif" || string(data[8:12]) == "avis") {
+		return "image/avif"
+	}
+	return ""
+}
+func imageMIME(data []byte) (string, error) {
+	mime := sniffImageMIME(data)
 	switch mime {
 	case "image/png", "image/jpeg", "image/gif":
 		config, _, err := image.DecodeConfig(bytes.NewReader(data))
@@ -294,11 +304,8 @@ func imageMIME(data []byte) (string, error) {
 			return "", errors.New("图片格式或尺寸无效（最大 8000 万像素）")
 		}
 		return mime, nil
-	case "image/webp", "image/bmp":
+	case "image/webp", "image/bmp", "image/avif":
 		return mime, nil
-	}
-	if len(data) >= 16 && string(data[4:8]) == "ftyp" && (string(data[8:12]) == "avif" || string(data[8:12]) == "avis") {
-		return "image/avif", nil
 	}
 	return "", errors.New("只保存 PNG、JPEG、GIF、WebP、BMP 或 AVIF 图片；拒绝 HTML / SVG 等内容")
 }

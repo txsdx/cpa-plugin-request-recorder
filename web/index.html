@@ -23,21 +23,23 @@
       <section class="intro">
         <div>
           <span class="eyebrow">OBSERVABILITY / 请求追踪</span>
-          <h1>每次请求，都有迹可循。</h1>
-          <p>从原始上下文到最终输出，查看模型、耗时与工具调用的完整链路。</p>
+          <h1>每个会话，保留完整历史。</h1>
+          <p>
+            自动合并连续上下文，只保留最新会话；查看文字、思考、工具调用和原图。
+          </p>
         </div>
         <div id="health" class="health">等待连接</div>
       </section>
       <section class="stats" id="stats">
         <div><span>筛选结果</span><strong>—</strong></div>
-        <div><span>本页成功率</span><strong>—</strong></div>
+        <div><span>最新请求成功率</span><strong>—</strong></div>
         <div><span>本页平均耗时</span><strong>—</strong></div>
-        <div><span>本页 token 总量</span><strong>—</strong></div>
+        <div><span>本页最新请求 token</span><strong>—</strong></div>
       </section>
       <section class="workspace">
         <div class="toolbar">
           <div class="section-title">
-            <span class="dot"></span>请求条目
+            <span class="dot"></span>会话记录
             <span id="total" class="count">0</span>
           </div>
           <div class="actions">
@@ -60,7 +62,7 @@
         <form id="filters" class="filters">
           <input
             name="q"
-            placeholder="搜索 key / 别名 / 模型 / 会话…"
+            placeholder="搜索别名 / 模型 / 会话…"
             class="search"
             aria-label="搜索"
           /><input
@@ -87,11 +89,11 @@
                   name="provider"
                   placeholder="codex / claude…" /></label
               ><label
-                >请求者 IP<input
-                  name="ip"
-                  placeholder="宿主提供时可用" /></label
-              ><label
-                >Key 指纹<input name="key_id" placeholder="SHA-256" /></label
+                >API key<input
+                  name="key"
+                  list="caller-keys"
+                  placeholder="选择或输入 API key"
+                  autocomplete="off" /></label
               ><label
                 >会话 ID<input
                   name="session"
@@ -126,15 +128,15 @@
             </colgroup>
             <thead>
               <tr>
-                <th>时间 / 请求</th>
+                <th>最新时间 / 会话</th>
                 <th>请求者</th>
                 <th>模型 / 提供商</th>
                 <th>状态</th>
                 <th>首 token / 总耗时</th>
                 <th>Token / 缓存命中</th>
-                <th>上游记录</th>
+                <th>服务商侧结果</th>
                 <th>最新用户提示词</th>
-                <th>上游最新响应</th>
+                <th>模型最新响应</th>
               </tr>
             </thead>
             <tbody id="rows"></tbody>
@@ -142,14 +144,14 @@
         </div>
         <div id="empty" class="empty">
           <span>⌕</span>
-          <h3>连接后查看请求记录</h3>
+          <h3>连接后查看会话记录</h3>
           <p>
             使用 CPA 管理密钥连接。同源 CPAMC
             已保存登录时自动连接；插件不另存密钥。
           </p>
         </div>
         <footer>
-          <span id="page-info">每页 50 条 · 仅显示已结束请求</span>
+          <span id="page-info">每页 50 条 · 每个会话保留最新完整历史</span>
           <div class="actions">
             <button id="prev">← 上一页</button
             ><button id="next">下一页 →</button>
@@ -157,8 +159,9 @@
         </footer>
       </section>
       <p class="footnote">
-        采集范围：进入 CPA 请求拦截器的模型执行。上游原文需要开启 CPA
-        request-log 并配置 logs_dir；未知指标显示为 —。
+        采集范围：进入 CPA
+        请求拦截器的模型执行。提示词与模型回答由回调直接记录；
+        服务商转换前结果可选通过 request-log 补全。未知指标显示为 —。
       </p>
     </main>
     <dialog id="login">
@@ -192,16 +195,16 @@
           </button>
         </div>
         <p>
-          可从条目详情直接绑定别名，或在这里输入 key。服务器仅保存 SHA-256
-          指纹和别名。
+          从条目打开时已自动选定 key，也可选择或输入 API key。默认同步 CPAMC
+          备注，手动设置的别名优先。
         </p>
         <label
           >API key<input
             id="alias-key"
-            type="password"
+            type="text"
+            list="caller-keys"
             autocomplete="off" /></label
-        ><label>或 key 指纹<input id="alias-id" placeholder="SHA-256" /></label
-        ><label
+        ><input id="alias-id" type="hidden" /> ><label
           >别名<input
             id="alias-name"
             maxlength="120"
@@ -228,22 +231,22 @@
         <button data-tab="conversation" class="selected" role="tab">
           对话回放</button
         ><button data-tab="request" role="tab">原请求</button
-        ><button data-tab="upstream" role="tab">上游最终结果</button
-        ><button data-tab="response" role="tab">下游最终结果</button
+        ><button data-tab="upstream" role="tab">服务商侧结果</button
+        ><button data-tab="response" role="tab">模型最终结果</button
         ><button data-tab="metadata" role="tab">元数据</button>
       </div>
       <div id="detail-body" class="detail-body"></div>
     </dialog>
     <dialog id="image-view" class="image-view">
       <div class="dialog-title">
-        <h2>原始图片</h2>
+        <h2>图片预览 · WebP 压缩</h2>
         <button data-close="image-view" aria-label="关闭原图">✕</button>
       </div>
-      <img id="full-image" alt="原始图片" referrerpolicy="no-referrer" /><a
-        id="image-download"
-        download="original-image"
-        >下载内嵌原图</a
-      >
+      <img
+        id="full-image"
+        alt="WebP 图片预览"
+        referrerpolicy="no-referrer"
+      /><button id="image-download" type="button">下载原图</button>
     </dialog>
     <dialog id="storage-view">
       <div class="dialog-title">
@@ -252,6 +255,7 @@
       </div>
       <div id="storage-body"></div>
     </dialog>
+    <datalist id="caller-keys"></datalist>
     <script src="app.js" defer></script>
   </body>
 </html>

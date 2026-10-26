@@ -36,7 +36,16 @@ func FinalResponse(raw string) (string, bool) {
 	if !complete {
 		messages = []Message{message("system", "error", "无法解析该提供商的流式输出；未保存 SSE 中间事件。")}
 	}
-	data, _ := json.Marshal(map[string]any{"object": "recorder.final_response", "messages": messages})
+	responseID := ""
+	for _, event := range events(raw) {
+		if value := str(event["id"]); value != "" {
+			responseID = value
+		}
+		if value := str(obj(event["message"])["id"]); value != "" {
+			responseID = value
+		}
+	}
+	data, _ := json.Marshal(map[string]any{"object": "recorder.final_response", "id": responseID, "messages": messages})
 	return string(data), complete
 }
 
@@ -62,6 +71,13 @@ func previewText(messages []Message, role string) string {
 			parts = append(parts, "[思考] "+m.Content)
 		}
 	}
+	if len(parts) == 0 && role == "assistant" {
+		for _, m := range messages {
+			if m.Kind == "error" {
+				parts = append(parts, "[错误] "+m.Content)
+			}
+		}
+	}
 	text := strings.Join(parts, "\n")
 	chars := []rune(text)
 	if len(chars) > 800 {
@@ -83,7 +99,12 @@ func updatePreviews(r *Record) {
 	if start >= 0 {
 		r.LatestPrompt = previewText(request[start:], "user")
 	}
+	r.LatestResponse = previewText(responseMessages(r.ResponseBody), "assistant")
+	r.LatestResponseSource = "cpa_response"
 	if r.UpstreamResponses != "" {
-		r.LatestResponse = previewText(responseMessages(r.UpstreamResponses), "assistant")
+		if value := previewText(responseMessages(r.UpstreamResponses), "assistant"); value != "" {
+			r.LatestResponse = value
+			r.LatestResponseSource = "provider_response"
+		}
 	}
 }

@@ -3,6 +3,7 @@ package recorder
 import (
 	"fmt"
 	"math/rand"
+	"net/http"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -57,7 +58,7 @@ func TestOnlineCompactionReplaysConcurrentWrites(t *testing.T) {
 		body := make([]byte, 96<<10)
 		_, err := random.Read(body)
 		check(t, err)
-		check(t, s.Save(&Record{Summary: Summary{ID: fmt.Sprint(i), StartedAt: time.Unix(int64(i), 0)}, ResponseBody: string(body)}))
+		check(t, s.Save(&Record{Summary: Summary{ID: fmt.Sprint(i), KeyID: fingerprint("compaction-client"), StartedAt: time.Unix(int64(i), 0)}, RequestHeaders: http.Header{"X-Session-Id": {fmt.Sprint(i)}}, ResponseBody: string(body)}))
 	}
 	compacted := make(chan error, 1)
 	go func() { compacted <- s.compactOnline() }()
@@ -78,16 +79,20 @@ func TestOnlineCompactionReplaysConcurrentWrites(t *testing.T) {
 		r, err := s.Get(fmt.Sprint(i))
 		check(t, err)
 		r.Model = fmt.Sprintf("concurrent-model-%d", i)
+		r.RequestID = fmt.Sprintf("turn-%d", i)
 		check(t, s.Save(r))
 		r.Model = "caller mutation after Save must not affect replay"
 		check(t, s.SetAlias(fingerprint(fmt.Sprint(i)), fmt.Sprint("备注", i)))
 	}
 	check(t, <-compacted)
 	for i := 0; i < 30; i++ {
-		r, err := s.Get(fmt.Sprint(i))
+		r, err := s.Get(fmt.Sprintf("turn-%d", i))
 		check(t, err)
 		if r.Model != fmt.Sprintf("concurrent-model-%d", i) {
 			t.Fatal("concurrent write lost or caller mutation replayed", r.Model)
+		}
+		if _, err := s.Get(fmt.Sprint(i)); err != ErrNotFound {
+			t.Fatal("compaction retained a superseded request index", err)
 		}
 	}
 	check(t, s.Prune(0, 30))

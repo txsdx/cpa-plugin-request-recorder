@@ -14,6 +14,8 @@ import (
 )
 
 type Config struct {
+	PreviewQuality              int    `yaml:"preview_quality"`
+	PreviewMaxDimension         int    `yaml:"preview_max_dimension"`
 	MaxDatabaseBytes            int64  `yaml:"max_database_bytes"`
 	RefreshIntervalSeconds      int    `yaml:"refresh_interval_seconds"`
 	MaxImageFiles               int    `yaml:"max_image_files"`
@@ -34,9 +36,12 @@ type Config struct {
 }
 
 func DefaultConfig() Config {
-	return Config{MaxDatabaseBytes: 1 << 30, RefreshIntervalSeconds: 1, ArchiveRemoteImages: true, MaxImageFiles: 100000, MaxImageBytes: 20 << 20, MaxImageStorageBytes: 2 << 30, MaxImagesPerRecord: 64, ImageWorkers: 2, ImageDownloadTimeoutSeconds: 20, DBPath: "data/request-recorder.db", RetentionDays: 30, MaxRecords: 100000, MaxBodyBytes: 64 << 20, MaxInflight: 256, MaxMemoryBytes: 256 << 20}
+	return Config{PreviewQuality: 75, PreviewMaxDimension: 1600, MaxDatabaseBytes: 1 << 30, RefreshIntervalSeconds: 1, ArchiveRemoteImages: true, MaxImageFiles: 100000, MaxImageBytes: 20 << 20, MaxImageStorageBytes: 2 << 30, MaxImagesPerRecord: 64, ImageWorkers: 2, ImageDownloadTimeoutSeconds: 20, DBPath: "data/request-recorder.db", RetentionDays: 30, MaxRecords: 100000, MaxBodyBytes: 64 << 20, MaxInflight: 256, MaxMemoryBytes: 256 << 20}
 }
 func (c Config) Validate() error {
+	if c.PreviewQuality < 1 || c.PreviewQuality > 100 || c.PreviewMaxDimension < 128 || c.PreviewMaxDimension > 4096 {
+		return errors.New("preview_quality must be 1..100; preview_max_dimension must be 128..4096")
+	}
 	if c.MaxDatabaseBytes < 8<<20 || c.RefreshIntervalSeconds < 1 || c.RefreshIntervalSeconds > 3600 {
 		return errors.New("max_database_bytes must be >= 8 MiB; refresh_interval_seconds must be 1..3600")
 	}
@@ -72,6 +77,7 @@ type Engine struct {
 	active       map[string]*active
 	pendingUsage map[string]wire.Usage
 	skipped      map[string]time.Time
+	finished     map[string]time.Time
 	jobs         map[string]*logJob
 	used         int
 	dropped      uint64
@@ -90,7 +96,8 @@ func New(c Config) (*Engine, error) {
 		return nil, err
 	}
 	s.limit = c.MaxDatabaseBytes
-	e := &Engine{store: s, cfg: c, active: map[string]*active{}, jobs: map[string]*logJob{}, pendingUsage: map[string]wire.Usage{}, skipped: map[string]time.Time{}, stop: make(chan struct{}), done: make(chan struct{})}
+	s.historyLimit = c.MaxBodyBytes
+	e := &Engine{store: s, cfg: c, active: map[string]*active{}, jobs: map[string]*logJob{}, pendingUsage: map[string]wire.Usage{}, skipped: map[string]time.Time{}, finished: map[string]time.Time{}, stop: make(chan struct{}), done: make(chan struct{})}
 	if err = s.Prune(c.RetentionDays, c.MaxRecords); err != nil {
 		s.Close()
 		return nil, err
@@ -137,6 +144,9 @@ func (e *Engine) error(err error) {
 }
 func (e *Engine) ensure(id string) *active {
 	if id == "" {
+		return nil
+	}
+	if _, done := e.finished[id]; done {
 		return nil
 	}
 	if a := e.active[id]; a != nil {
@@ -220,7 +230,7 @@ func (e *Engine) metadata(r *Record, m map[string]any) {
 		keys []string
 	}{
 		{&r.SessionID, []string{"canonical_session_id", "execution_session_id", "session_id"}},
-		{&r.ParentSessionID, []string{"parent_session_id"}}, {&r.ClientIP, []string{"resolved_client_ip", "client_ip"}},
+		{&r.ParentSessionID, []string{"parent_session_id"}},
 		{&r.UserAgent, []string{"user_agent"}}, {&r.AuthID, []string{"selected_auth_id"}},
 		{&r.ReasoningEffort, []string{"reasoning_effort"}}, {&r.CallerScope, []string{"caller_scope"}},
 	} {
@@ -256,6 +266,15 @@ func (e *Engine) Response(req wire.Response, stream bool) error {
 		return nil
 	}
 	if len(req.Body) > 0 {
+		// CPA may pass a decoded SSE data payload (one bare JSON object),
+		// rather than wire-format "data:" frames. Keep its event boundary
+		// before accumulating, otherwise adjacent JSON objects become invalid.
+		if stream && (json.Valid(req.Body) || strings.TrimSpace(string(req.Body)) == "[DONE]") {
+			framed := make([]byte, 0, len(req.Body)+8)
+			framed = append(framed, "data: "...)
+			framed = append(framed, req.Body...)
+			req.Body = append(framed, '\n', '\n')
+		}
 		if r.FirstChunkMS == nil {
 			v := ms(time.Since(r.StartedAt))
 			r.FirstChunkMS = &v
@@ -393,6 +412,9 @@ func (e *Engine) joinUsage(u wire.Usage) (bool, error) {
 		return true, nil
 	}
 	if r, err := e.store.Get(u.RequestID); err == nil {
+		if r.RequestID != "" && r.RequestID != u.RequestID {
+			return false, nil
+		}
 		applyUsage(r, u)
 		return true, e.store.Save(r)
 	} else if !errors.Is(err, ErrNotFound) {
@@ -459,8 +481,12 @@ func (e *Engine) persist(a *active) error {
 func (e *Engine) Complete(c wire.Completion) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	if _, done := e.finished[c.RequestID]; done {
+		return nil
+	}
 	if _, skipped := e.skipped[c.RequestID]; skipped {
 		delete(e.skipped, c.RequestID)
+		e.markFinished(c.RequestID)
 		return nil
 	}
 	// Completion may be repeated by a host; do not overwrite a completed record.
@@ -501,14 +527,25 @@ func (e *Engine) Complete(c wire.Completion) error {
 	}
 	if err := e.persist(a); err != nil {
 		e.error(err)
+		if errors.Is(err, ErrConversationTooLarge) {
+			e.used -= a.size
+			delete(e.active, c.RequestID)
+			e.dropped++
+			e.markFinished(c.RequestID)
+			return nil
+		}
 		return err
 	}
 	e.used -= a.size
 	delete(e.active, c.RequestID)
-	e.images.enqueue(c.RequestID)
+	e.markFinished(c.RequestID)
+	if r.RequestID != c.RequestID {
+		return nil // an older concurrent turn did not replace the latest head
+	}
+	e.images.enqueue(r.ID)
 	if e.cfg.LogsDir != "" {
 		if len(e.jobs) < 4096 {
-			e.jobs[c.RequestID] = &logJob{trace: r.TraceID, started: r.StartedAt, deadline: time.Now().Add(30 * time.Second)}
+			e.jobs[r.ID] = &logJob{trace: r.TraceID, started: r.StartedAt, deadline: time.Now().Add(30 * time.Second)}
 		} else {
 			r.UpstreamState = "unavailable"
 			r.UpstreamError = "日志补全队列已满"
@@ -516,6 +553,15 @@ func (e *Engine) Complete(c wire.Completion) error {
 		}
 	}
 	return nil
+}
+func (e *Engine) markFinished(id string) {
+	if len(e.finished) >= 32768 {
+		for old := range e.finished {
+			delete(e.finished, old)
+			break
+		}
+	}
+	e.finished[id] = time.Now()
 }
 func (e *Engine) maintain() {
 	defer close(e.done)
@@ -529,6 +575,11 @@ func (e *Engine) maintain() {
 		case <-ticker.C:
 			e.mu.Lock()
 			ticks++
+			for id, at := range e.finished {
+				if time.Since(at) > 5*time.Minute {
+					delete(e.finished, id)
+				}
+			}
 			for id, started := range e.skipped {
 				if time.Since(started) > 30*time.Minute {
 					delete(e.skipped, id)

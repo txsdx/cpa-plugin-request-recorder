@@ -8,6 +8,7 @@ import (
 )
 
 type Message struct {
+	ResponseID string  `json:"response_id,omitempty"`
 	Role       string  `json:"role"`
 	Kind       string  `json:"kind"`
 	Name       string  `json:"name,omitempty"`
@@ -570,6 +571,10 @@ func Conversation(request, response string) []Message {
 		resp[i].Source = "response"
 	}
 	out = append(out, resp...)
+	resolveToolNames(out)
+	return out
+}
+func resolveToolNames(out []Message) {
 	names := map[string]string{}
 	for _, m := range out {
 		if m.Kind == "tool_call" && m.ToolCallID != "" {
@@ -581,7 +586,6 @@ func Conversation(request, response string) []Message {
 			out[i].Name = names[out[i].ToolCallID]
 		}
 	}
-	return out
 }
 func UpstreamConversation(r *Record) []Message {
 	messages := responseMessages(r.UpstreamResponses)

@@ -4,6 +4,10 @@ on:
   pull_request:
 permissions:
   contents: read
+# Bundle the image decoder; no system codec library is required.
+env:
+  GOFLAGS: -tags=nodynamic
+
 jobs:
   test:
     runs-on: ubuntu-latest

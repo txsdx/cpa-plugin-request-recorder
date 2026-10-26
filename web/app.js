@@ -7,6 +7,7 @@ let managementKey = "",
   offset = 0,
   total = 0,
   detail = null,
+  detailGeneration = 0,
   activeTab = "conversation",
   generation = 0,
   refreshRequests = 0,
@@ -23,7 +24,7 @@ const outcomeNames = {
 const sourceNames = {
   log_captured: "已保存",
   pending: "补全中",
-  unavailable: "不可用",
+  unavailable: "未采集（可选）",
   truncated: "有截断",
 };
 const fmt = (n) => (n == null ? "—" : Number(n).toLocaleString("zh-CN"));
@@ -136,6 +137,61 @@ async function sha256Hex(text) {
     b.toString(16).padStart(2, "0"),
   ).join("");
 }
+let callerKeysById = new Map(),
+  callerKeysFor = "",
+  keyLoadPromise = null;
+function renderKeyChoices() {
+  $("caller-keys").replaceChildren(
+    ...Array.from(callerKeysById.values(), (entry) => {
+      const option = el("option");
+      option.value = entry.key;
+      option.label = entry.alias || "";
+      return option;
+    }),
+  );
+}
+async function fetchCallerKeys(credential) {
+  const options = {
+    credentials: "omit",
+    cache: "no-store",
+    headers: { Authorization: "Bearer " + credential },
+  };
+  let response = await fetch("/v8/management/config/access/api-keys", options);
+  if (response.status === 404 || response.status === 405)
+    response = await fetch("/v0/management/api-keys", options);
+  if (!response.ok)
+    throw new Error("无法读取 CPA key 列表（HTTP " + response.status + "）");
+  const data = await response.json(),
+    keys = Array.isArray(data) ? data : data["api-keys"];
+  if (
+    !Array.isArray(keys) ||
+    keys.length > 10000 ||
+    keys.some((key) => typeof key !== "string")
+  )
+    throw new Error("CPA key 列表格式无法识别");
+  const entries = new Map();
+  for (const key of keys) entries.set(await sha256Hex(key), { key, alias: "" });
+  if (credential === managementKey) {
+    callerKeysById = entries;
+    callerKeysFor = credential;
+    lastRowsSignature = "";
+    renderKeyChoices();
+  }
+  return keys;
+}
+async function loadCallerKeys(force = false) {
+  if (!managementKey || (!force && callerKeysFor === managementKey)) return;
+  if (keyLoadPromise) return keyLoadPromise;
+  const credential = managementKey;
+  keyLoadPromise = fetchCallerKeys(credential)
+    .catch(() => {
+      if (credential === managementKey) callerKeysFor = credential;
+    })
+    .finally(() => {
+      keyLoadPromise = null;
+    });
+  return keyLoadPromise;
+}
 let panelMessage = "",
   panelSyncPromise = null,
   panelSyncAt = 0,
@@ -168,29 +224,7 @@ async function syncPanelAliases(force = false) {
     const snapshot = JSON.stringify([panel.apiBase, names]);
     if (snapshot === panelSnapshot) return;
     const credential = managementKey;
-    // Fetch the actual keys only in memory to translate CPAMC's scoped hash to
-    // the recorder's SHA-256 key ID. Only hashes and labels reach /aliases/sync.
-    let response = await fetch("/v8/management/config/access/api-keys", {
-      credentials: "omit",
-      cache: "no-store",
-      headers: { Authorization: "Bearer " + credential },
-    });
-    if (response.status === 404 || response.status === 405)
-      response = await fetch("/v0/management/api-keys", {
-        credentials: "omit",
-        cache: "no-store",
-        headers: { Authorization: "Bearer " + credential },
-      });
-    if (!response.ok)
-      throw new Error("无法读取 CPA key 列表（HTTP " + response.status + "）");
-    const data = await response.json();
-    const keys = Array.isArray(data) ? data : data["api-keys"];
-    if (
-      !Array.isArray(keys) ||
-      keys.length > 10000 ||
-      keys.some((key) => typeof key !== "string")
-    )
-      throw new Error("CPA key 列表格式无法识别或超过同步上限");
+    const keys = await fetchCallerKeys(credential);
     const aliases = {};
     let matched = 0;
     for (const key of keys) {
@@ -259,6 +293,9 @@ function clearAuthenticatedView() {
   authGeneration++;
   clearDetailImages();
   detail = null;
+  callerKeysById.clear();
+  callerKeysFor = "";
+  $("caller-keys").replaceChildren();
   if ($("detail").open) $("detail").close();
   lastRowsSignature = "";
   $("rows").replaceChildren();
@@ -274,11 +311,12 @@ function clearAuthenticatedView() {
     .querySelectorAll("#stats strong")
     .forEach((n) => (n.textContent = "—"));
 }
-function filterQuery() {
+async function filterQuery() {
   const q = new URLSearchParams();
   for (const [k, v] of new FormData($("filters")))
     if (v) {
-      q.set(k, k === "from" || k === "to" ? new Date(v).toISOString() : v);
+      if (k === "key") q.set("key_id", await sha256Hex(v.trim()));
+      else q.set(k, k === "from" || k === "to" ? new Date(v).toISOString() : v);
     }
   q.set("offset", offset);
   q.set("limit", "50");
@@ -293,8 +331,10 @@ async function refresh() {
   refreshRequests++;
   try {
     await syncPanelAliases();
+    await loadCallerKeys();
+    const query = await filterQuery();
     const [page, status] = await Promise.all([
-      api("/records?" + filterQuery()),
+      api("/records?" + query),
       api("/status"),
     ]);
     if (seq !== generation) return;
@@ -303,6 +343,14 @@ async function refresh() {
     if (document.activeElement !== $("refresh-interval"))
       $("refresh-interval").value = refreshSeconds;
     renderRows(page.items);
+    const currentHead =
+      detail && page.items.find((r) => r.id === detail.record.id);
+    if (
+      $("detail").open &&
+      currentHead &&
+      currentHead.request_id !== detail.record.request_id
+    )
+      await openDetail(currentHead.id, true);
     $("total").textContent = fmt(total);
     $("connection").textContent = "● 已连接";
     $("connection").className = "";
@@ -311,8 +359,8 @@ async function refresh() {
         "div",
         "",
         status.logs_enabled
-          ? "上游日志补全已启用"
-          : "上游最终结果：未配置 logs_dir",
+          ? "模型最终结果：直接采集 · 服务商侧结果：日志补全已启用"
+          : "模型最终结果：直接采集 · 服务商侧转换前结果：未启用（可选）",
       ),
       el(
         "div",
@@ -338,11 +386,10 @@ async function refresh() {
       );
     if (status.last_error) warnings.push("采集错误：" + status.last_error);
     if (status.dropped_requests)
-      warnings.push("部分请求因采集并发超限未被记录，请调整 max_inflight。");
-    if (!status.logs_enabled)
       warnings.push(
-        "当前只有下游响应。开启 CPA request-log 并配置插件 logs_dir 后才能补全上游最终结果。",
+        "部分请求因采集或会话容量限制未更新，请查看采集错误和容量设置。",
       );
+
     notice(warnings.join(" "));
     const sums = page.items;
     const success = sums.filter((r) => r.outcome === "succeeded").length;
@@ -364,9 +411,9 @@ async function refresh() {
     $("next").disabled = offset + 50 >= total;
     $("empty").hidden = sums.length > 0;
     if (!sums.length) {
-      $("empty").querySelector("h3").textContent = "暂无匹配的请求";
+      $("empty").querySelector("h3").textContent = "暂无匹配的会话";
       $("empty").querySelector("p").textContent =
-        "请求结束后自动记录；也可以调整筛选条件。";
+        "请求结束后更新对应会话；也可以调整筛选条件。";
     }
   } catch (e) {
     if (seq === generation) {
@@ -386,7 +433,7 @@ function renderRows(items) {
   for (const r of items) {
     const tr = el("tr");
     tr.tabIndex = 0;
-    tr.setAttribute("aria-label", "查看请求 " + r.id);
+    tr.setAttribute("aria-label", "查看会话 " + r.id);
     tr.onclick = () => openDetail(r.id);
     tr.onkeydown = (e) => {
       if (e.key === "Enter") openDetail(r.id);
@@ -398,9 +445,17 @@ function renderRows(items) {
     const who = el(
       "td",
       "",
-      r.key_alias || r.key_hint || r.caller_scope?.slice(0, 14) || "未知请求者",
+      r.key_alias ||
+        callerKeysById.get(r.key_id)?.key ||
+        r.key_hint ||
+        "未知请求者",
     );
-    who.append(el("small", "", r.client_ip || "IP 未提供"));
+    const knownKey = callerKeysById.get(r.key_id);
+    if (knownKey) {
+      knownKey.alias = r.key_alias || "";
+      who.title = knownKey.key;
+      if (r.key_alias) who.append(el("small", "mono", knownKey.key));
+    }
     const model = el(
       "td",
       "model",
@@ -437,7 +492,9 @@ function renderRows(items) {
             : r.upstream_state === "log_captured"
               ? ""
               : "incomplete"),
-        sourceNames[r.upstream_state] || "未知",
+        r.upstream_state === "unavailable" && !r.upstream_error
+          ? "未启用"
+          : sourceNames[r.upstream_state] || "未知",
       ),
     );
     if (r.warnings?.length)
@@ -446,15 +503,18 @@ function renderRows(items) {
       response = el("td");
     prompt.append(el("div", "row-preview", r.latest_prompt || "—"));
     response.append(
-      el(
-        "div",
-        "row-preview",
-        r.latest_response ||
-          (r.upstream_state === "pending"
-            ? "等待上游结果补全…"
-            : "上游结果不可用"),
-      ),
+      el("div", "row-preview", r.latest_response || "点击条目查看模型最终结果"),
     );
+    if (r.latest_response_source)
+      response.append(
+        el(
+          "small",
+          "",
+          r.latest_response_source === "provider_response"
+            ? "服务商侧 · 转换前"
+            : "CPA 返回 · 客户端协议",
+        ),
+      );
     tr.append(
       time,
       who,
@@ -468,22 +528,37 @@ function renderRows(items) {
     );
     $("rows").append(tr);
   }
+  renderKeyChoices();
 }
-async function openDetail(id) {
-  const authRevision = authGeneration;
+async function openDetail(id, preserveTab = false) {
+  const authRevision = authGeneration,
+    sequence = ++detailGeneration;
   try {
-    const data = await api("/record?id=" + encodeURIComponent(id));
-    if (authRevision !== authGeneration || !managementKey) return;
+    const needsRaw =
+      preserveTab && !["conversation", "metadata"].includes(activeTab);
+    const data = await api(
+      "/record?id=" + encodeURIComponent(id) + (needsRaw ? "" : "&view=chat"),
+    );
+    data.rawLoaded = needsRaw;
+    if (
+      authRevision !== authGeneration ||
+      sequence !== detailGeneration ||
+      !managementKey
+    )
+      return;
     if (!detail || detail.record.id !== data.record.id) clearDetailImages();
     detail = data;
-    activeTab = "conversation";
+    if (!preserveTab) activeTab = "conversation";
     $("detail-title").textContent =
       data.record.response_model || data.record.model || "请求详情";
     $("detail-sub").textContent =
-      data.record.id + " · " + date(data.record.started_at);
+      `${data.record.id} · ${data.record.conversation_turns || 1} 次模型请求 · 最新 ${date(data.record.started_at)}`;
     const r = data.record;
     const vals = [
-      ["请求者", r.key_alias || r.key_hint || "—"],
+      [
+        "请求者",
+        r.key_alias || callerKeysById.get(r.key_id)?.key || r.key_hint || "—",
+      ],
       ["首 token", duration(r.ttft_ms)],
       ["完整耗时", duration(r.duration_ms)],
       ["Token", fmt(r.tokens?.TotalTokens)],
@@ -543,7 +618,8 @@ function clearDetailImages() {
   clearTimeout(imagePollTimer);
   imagePollTimer = 0;
   $("full-image").removeAttribute("src");
-  $("image-download").removeAttribute("href");
+  $("image-download").onclick = null;
+  $("image-download").disabled = false;
   if ($("image-view").open) $("image-view").close();
 }
 function pumpImages() {
@@ -559,8 +635,8 @@ function pumpImages() {
       });
   }
 }
-function archivedImage(image, recordID) {
-  const key = recordID + ":" + image.id;
+function archivedImage(image, recordID, variant = "preview") {
+  const key = recordID + ":" + image.id + ":" + variant;
   if (imagePromises.has(key)) return imagePromises.get(key);
   const session = imageSession,
     signal = imageController.signal;
@@ -576,17 +652,34 @@ function archivedImage(image, recordID) {
           "/image?record_id=" +
           encodeURIComponent(recordID) +
           "&id=" +
-          encodeURIComponent(image.id);
-        const response = await fetch(path, {
-          signal,
-          credentials: "omit",
-          cache: "no-store",
-          headers: { Authorization: "Bearer " + managementKey },
-        });
-        if (!response.ok)
-          throw new Error("CPA 图片读取失败（HTTP " + response.status + "）");
+          encodeURIComponent(image.id) +
+          "&variant=" +
+          variant;
+        let response;
+        for (let attempt = 0; attempt < 10; attempt++) {
+          response = await fetch(path, {
+            signal,
+            credentials: "omit",
+            cache: "no-store",
+            headers: { Authorization: "Bearer " + managementKey },
+          });
+          if (response.status !== 429 || attempt === 9) break;
+          await response.body?.cancel();
+          await new Promise((resolve) => setTimeout(resolve, 400));
+          if (signal.aborted) throw new DOMException("Canceled", "AbortError");
+        }
+        if (!response.ok) {
+          const error = await response.json().catch(() => ({}));
+          throw new Error(
+            error.error || "CPA 图片读取失败（HTTP " + response.status + "）",
+          );
+        }
         const blob = await response.blob();
-        if (!/^image\/(png|jpeg|gif|webp|bmp|avif)$/.test(blob.type))
+        if (
+          variant === "preview"
+            ? blob.type !== "image/webp"
+            : !/^image\/(png|jpeg|gif|webp|bmp|avif)$/.test(blob.type)
+        )
           throw new Error("CPA 返回的图片类型不支持");
         if (session !== imageSession || signal.aborted)
           throw new DOMException("Canceled", "AbortError");
@@ -651,12 +744,35 @@ function scheduleImagePoll() {
     }
   }, 1000);
 }
+async function downloadOriginal(image, recordID, button) {
+  const label = button.textContent,
+    session = imageSession;
+  button.disabled = true;
+  button.textContent = "正在读取原图…";
+  try {
+    const original = await archivedImage(image, recordID, "original");
+    if (session !== imageSession) return;
+    const link = el("a");
+    link.href = original.url;
+    link.download =
+      image.id +
+      "." +
+      (original.mime === "image/jpeg" ? "jpg" : original.mime.split("/")[1]);
+    link.click();
+  } catch (error) {
+    if (error.name !== "AbortError") notice(error.message);
+  } finally {
+    if (session === imageSession) {
+      button.disabled = false;
+      button.textContent = label;
+    }
+  }
+}
 function imageView(image) {
-  const box = el("div", "image-card");
+  const box = el("div", "image-card"),
+    recordID = detail.record.id;
   box.dataset.imageId = image.id || "";
-  box.append(
-    el("div", "image-caption", image.alt || "原始图片 · CPA 本地归档"),
-  );
+  box.append(el("div", "image-caption", "WebP 压缩预览 · 原图保存在 CPA"));
   if (image.status !== "ready") {
     box.append(
       el(
@@ -673,10 +789,9 @@ function imageView(image) {
       retry.type = "button";
       retry.onclick = async () => {
         try {
-          await api(
-            "/images/retry?record_id=" + encodeURIComponent(detail.record.id),
-            { method: "POST" },
-          );
+          await api("/images/retry?record_id=" + encodeURIComponent(recordID), {
+            method: "POST",
+          });
           image.status = "pending";
           image.error = "";
           renderDetail();
@@ -689,36 +804,33 @@ function imageView(image) {
     }
     return box;
   }
-  const img = el("img", "original-image");
-  img.alt = image.alt || "CPA 保存的原始图片";
+  const img = el("img", "original-image"),
+    status = el("p", "muted", "从 CPA 加载 WebP 预览…");
+  img.alt = "WebP 图片预览";
   img.loading = "lazy";
-  const status = el("p", "muted", "从 CPA 加载原图…");
-  box.append(img, status);
-  const recordID = detail.record.id;
+  const download = el("button", "link", "下载原图");
+  download.type = "button";
+  download.onclick = () => downloadOriginal(image, recordID, download);
+  box.append(img, status, download);
   const load = async () => {
     try {
       const saved = await archivedImage(image, recordID);
       if (!box.isConnected) return;
+      img.onerror = () => {
+        status.className = "error";
+        status.textContent = "WebP 预览无法解码；仍可下载原图。";
+      };
+      img.onload = () => status.remove();
       img.src = saved.url;
-      status.remove();
-      img.onerror = () =>
-        box.append(
-          el("p", "error", "本地图片无法解码；原始数据仍保留在 CPA。"),
-        );
       const open = () => {
         $("full-image").src = saved.url;
         $("image-download").hidden = false;
-        $("image-download").href = saved.url;
-        $("image-download").download =
-          image.id +
-          "." +
-          (saved.mime.split("/")[1] === "jpeg"
-            ? "jpg"
-            : saved.mime.split("/")[1]);
+        $("image-download").onclick = () =>
+          downloadOriginal(image, recordID, $("image-download"));
         $("image-view").showModal();
       };
       img.onclick = open;
-      const zoom = el("button", "link", "查看已归档原图 ↗");
+      const zoom = el("button", "link", "放大 WebP 预览 ↗");
       zoom.type = "button";
       zoom.onclick = open;
       box.append(zoom);
@@ -726,19 +838,12 @@ function imageView(image) {
       if (error.name !== "AbortError" && box.isConnected) {
         status.className = "error";
         status.textContent = error.message;
-        const retry = el("button", "", "重试服务端保存");
-        retry.onclick = async () => {
-          try {
-            await api(
-              "/images/retry?record_id=" + encodeURIComponent(recordID),
-              { method: "POST" },
-            );
-            image.status = "pending";
-            renderDetail();
-            scheduleImagePoll();
-          } catch (err) {
-            notice(err.message);
-          }
+        const retry = el("button", "link", "重试加载预览");
+        retry.type = "button";
+        retry.onclick = () => {
+          retry.remove();
+          status.textContent = "正在加载 WebP 预览…";
+          load();
         };
         box.append(retry);
       }
@@ -832,31 +937,12 @@ function renderDetail() {
       el(
         "div",
         "view-note",
-        "根据这次请求的历史上下文和完整最终结果还原。原图通过 CPA 鉴权接口提供，浏览器不访问源站。",
+        "每个会话保留最新完整历史。原图通过 CPA 鉴权接口提供，浏览器不访问源站。",
       ),
     );
     if (!detail.conversation?.length)
       body.append(el("p", "muted", "无可还原的对话内容，请查看原文。"));
-    let source = "";
-    for (const m of detail.conversation || []) {
-      if (m.source !== source) {
-        source = m.source;
-        body.append(
-          el(
-            "div",
-            "split-marker",
-            source === "request"
-              ? "REQUEST · 原请求中的历史"
-              : "RESPONSE · 本次模型输出（下游）",
-          ),
-        );
-      }
-      body.append(bubble(m));
-    }
-    if (detail.upstream_conversation?.length) {
-      body.append(el("div", "split-marker", "UPSTREAM · 上游完整最终结果"));
-      for (const m of detail.upstream_conversation) body.append(bubble(m));
-    }
+    for (const m of detail.conversation || []) body.append(bubble(m));
     if (r.error) body.append(el("div", "warnings", r.error));
   } else if (activeTab === "request") {
     body.append(
@@ -896,30 +982,34 @@ function renderDetail() {
           "div",
           "warnings",
           r.upstream_error ||
-            "上游最终结果尚不可用。请开启 CPA request-log 并配置 logs_dir；点击“重新读取”检查补全状态。",
+            "模型最终回答已由回调直接记录。此页是可选的服务商转换前结果；如需查看，再启用 CPA request-log 并配置 logs_dir。",
         ),
       );
     const reload = el("button", "", "重新读取");
     reload.onclick = () => openDetail(r.id);
     body.append(
       reload,
-      section("最终上游请求正文", r.upstream_requests),
-      section("上游完整最终结果", r.upstream_responses),
+      section("服务商侧请求正文（转换前）", pretty(r.upstream_requests)),
+      section("服务商侧最终结果（转换前）", pretty(r.upstream_responses)),
     );
+    for (const m of detail.upstream_conversation || []) body.append(bubble(m));
   } else if (activeTab === "response") {
     body.append(
       el(
         "div",
         "view-note",
-        "这是 response interceptor 观察到的下游协议响应，流式内容按原顺序拼接；后续插件或宿主还可能修改。",
+        "来自 CPA 响应回调的模型最终结果；流式分片已合并，可能已转换为客户端使用的协议，无需开启请求日志。",
       ),
-      section("下游完整最终结果", pretty(r.response_body)),
+      section("模型最终结果（CPA 响应回调）", pretty(r.response_body)),
       section("响应头", JSON.stringify(r.response_headers, null, 2)),
     );
   } else {
     const meta = { ...r };
     for (const k of [
+      "key_id",
+      "caller_scope",
       "request_body",
+      "conversation_history",
       "intercepted_body",
       "request_headers",
       "response_headers",
@@ -945,7 +1035,7 @@ function renderDetail() {
     alias.onclick = () => {
       $("alias-id").value = r.key_id;
       $("alias-name").value = r.key_alias || "";
-      $("alias-key").value = "";
+      $("alias-key").value = callerKeysById.get(r.key_id)?.key || "";
       $("alias-dialog").showModal();
     };
     body.prepend(alias);
@@ -1000,7 +1090,10 @@ $("storage-open").onclick = async () => {
   }
 };
 $("login-open").onclick = () => $("login").showModal();
-$("refresh").onclick = () => refresh().catch(() => {});
+$("refresh").onclick = async () => {
+  await loadCallerKeys(true);
+  await refresh().catch(() => {});
+};
 $("alias-open").onclick = () => {
   $("alias-form").reset();
   $("alias-dialog").showModal();
@@ -1022,8 +1115,12 @@ $("login-form").onsubmit = async (e) => {
 $("alias-form").onsubmit = async (e) => {
   e.preventDefault();
   $("alias-error").textContent = "";
-  const key = $("alias-key").value;
+  const key = $("alias-key").value.trim();
   $("alias-key").value = "";
+  if (!key && !$("alias-id").value) {
+    $("alias-error").textContent = "请选择或填写 API key";
+    return;
+  }
   try {
     await api("/aliases", {
       method: "POST",
@@ -1058,23 +1155,53 @@ $("next").onclick = () => {
   refresh().catch(() => {});
 };
 for (const b of document.querySelectorAll("[data-close]"))
-  b.onclick = () => $(b.dataset.close).close();
-for (const b of document.querySelectorAll("[data-tab]"))
   b.onclick = () => {
-    activeTab = b.dataset.tab;
-    renderDetail();
+    if (b.dataset.close === "detail") detailGeneration++;
+    $(b.dataset.close).close();
   };
-$("export").onclick = () => {
-  if (!detail) return;
-  const blob = new Blob([JSON.stringify(detail, null, 2)], {
-    type: "application/json",
-  });
-  const url = URL.createObjectURL(blob);
-  const a = el("a");
-  a.href = url;
-  a.download = "request-" + detail.record.id + ".json";
-  a.click();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
+async function ensureRawDetail() {
+  const current = detail;
+  if (!current || current.rawLoaded) return Boolean(current);
+  const data = await api("/record?id=" + encodeURIComponent(current.record.id));
+  if (detail !== current || !$("detail").open) return false;
+  data.rawLoaded = true;
+  detail = data;
+  return true;
+}
+for (const b of document.querySelectorAll("[data-tab]"))
+  b.onclick = async () => {
+    activeTab = b.dataset.tab;
+    try {
+      if (
+        !["conversation", "metadata"].includes(activeTab) &&
+        !detail?.rawLoaded
+      ) {
+        $("detail-body").replaceChildren(
+          el("p", "muted", "正在读取原文（包含原始图片字段）…"),
+        );
+        if (!(await ensureRawDetail())) return;
+      }
+      renderDetail();
+    } catch (error) {
+      notice(error.message);
+    }
+  };
+$("export").onclick = async () => {
+  try {
+    if (!(await ensureRawDetail())) return;
+    const { rawLoaded, ...content } = detail;
+    const blob = new Blob([JSON.stringify(content, null, 2)], {
+      type: "application/json",
+    });
+    const url = URL.createObjectURL(blob),
+      a = el("a");
+    a.href = url;
+    a.download = "conversation-" + detail.record.id + ".json";
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  } catch (error) {
+    notice(error.message);
+  }
 };
 function scheduleRefresh() {
   clearTimeout(refreshTimer);
@@ -1129,5 +1256,8 @@ window.addEventListener("storage", (event) => {
   }
 });
 connectFromPanel();
-$("detail").addEventListener("close", clearDetailImages);
+$("detail").addEventListener("close", () => {
+  detailGeneration++;
+  clearDetailImages();
+});
 window.addEventListener("pagehide", clearDetailImages);

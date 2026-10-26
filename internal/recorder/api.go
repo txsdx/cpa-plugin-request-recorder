@@ -17,7 +17,7 @@ const APIBase = "/v0/management/plugins/" + PluginID
 const ResourceBase = "/v0/resource/plugins/" + PluginID
 
 // Version is injected from the validated release tag by the build.
-var Version = "0.3.0"
+var Version = "0.4.0"
 
 func Registration() map[string]any {
 	return map[string]any{"schema_version": 6, "metadata": map[string]any{
@@ -27,6 +27,8 @@ func Registration() map[string]any {
 			{"Name": "refresh_interval_seconds", "Type": "integer", "Description": "列表自动刷新间隔秒数，默认 1 秒，范围 1..3600"},
 			{"Name": "db_path", "Type": "string", "Description": "持久化数据库路径，变更需重启"},
 			{"Name": "images_dir", "Type": "string", "Description": "图片归档目录，默认数据库旁的 <数据库名>-images"},
+			{"Name": "preview_quality", "Type": "integer", "Description": "在线 WebP 预览画质，默认 75，范围 1..100；原图下载不改变"},
+			{"Name": "preview_max_dimension", "Type": "integer", "Description": "WebP 预览最长边，默认 1600 像素，范围 128..4096；小图不放大"},
 			{"Name": "archive_remote_images", "Type": "boolean", "Description": "由服务器下载并保存公网 HTTPS 图片"},
 			{"Name": "max_image_files", "Type": "integer", "Description": "图片缓存最大文件数（防止大量小图耗尽 inode）"},
 			{"Name": "max_image_bytes", "Type": "integer", "Description": "单张图片最大字节数"},
@@ -96,7 +98,7 @@ func (e *Engine) Management(req wire.ManagementRequest, web fs.FS) wire.Manageme
 			return result(200, e.Status())
 		case "/records":
 			q := req.Query
-			f := Filter{Query: q.Get("q"), KeyID: q.Get("key_id"), Alias: q.Get("alias"), IP: q.Get("ip"), Model: q.Get("model"), Provider: q.Get("provider"), Outcome: q.Get("outcome"), Session: q.Get("session"), Reasoning: q.Get("reasoning")}
+			f := Filter{Query: q.Get("q"), KeyID: q.Get("key_id"), Alias: q.Get("alias"), Model: q.Get("model"), Provider: q.Get("provider"), Outcome: q.Get("outcome"), Session: q.Get("session"), Reasoning: q.Get("reasoning")}
 			var err error
 			if q.Get("from") != "" {
 				f.From, err = time.Parse(time.RFC3339, q.Get("from"))
@@ -126,7 +128,7 @@ func (e *Engine) Management(req wire.ManagementRequest, web fs.FS) wire.Manageme
 			if err != nil {
 				return result(500, map[string]string{"error": "database read failed"})
 			}
-			messages := Conversation(r.RequestBody, r.ResponseBody)
+			messages := conversationMessages(r)
 			upstream := UpstreamConversation(r)
 			if r.Images == nil {
 				if !e.images.pending(r.ID) {
@@ -134,7 +136,7 @@ func (e *Engine) Management(req wire.ManagementRequest, web fs.FS) wire.Manageme
 				}
 			} else {
 				for _, im := range r.Images {
-					if im.Status == "pending" || im.Status == "ready" && !e.images.exists(im.Hash) {
+					if im.Status == "pending" || im.Status == "ready" && !e.images.exists(im) {
 						if !e.images.pending(r.ID) {
 							e.images.enqueue(r.ID)
 						}
@@ -144,6 +146,13 @@ func (e *Engine) Management(req wire.ManagementRequest, web fs.FS) wire.Manageme
 			}
 			e.images.decorate(messages, r.Images)
 			e.images.decorate(upstream, r.Images)
+			if req.Query.Get("view") == "chat" {
+				// Base64 originals must not travel in hidden raw fields when the
+				// browser only needs the conversation and WebP thumbnails.
+				for _, body := range recordBodyFields(r) {
+					*body = ""
+				}
+			}
 			return result(200, map[string]any{"record": r, "conversation": messages, "upstream_conversation": upstream})
 		case "/images":
 			id := req.Query.Get("record_id")
@@ -227,6 +236,10 @@ func (e *Engine) Management(req wire.ManagementRequest, web fs.FS) wire.Manageme
 
 func (e *Engine) imageResponse(req wire.ManagementRequest) wire.ManagementResponse {
 	id, recordID := req.Query.Get("id"), req.Query.Get("record_id")
+	variant := req.Query.Get("variant")
+	if variant != "" && variant != "original" && variant != "preview" {
+		return result(400, map[string]string{"error": "invalid image variant"})
+	}
 	if !validSHA256(id) || len(recordID) == 0 || len(recordID) > 256 {
 		return result(400, map[string]string{"error": "invalid image reference"})
 	}
@@ -241,15 +254,25 @@ func (e *Engine) imageResponse(req wire.ManagementRequest) wire.ManagementRespon
 		if asset.Status != "ready" {
 			return result(409, map[string]string{"error": "image is not archived", "status": asset.Status})
 		}
-		data, err := e.images.read(asset)
+		var data []byte
+		mime, name, disposition := asset.MIME, imageDownloadName(asset), "attachment"
+		if variant == "preview" {
+			data, err = e.images.preview(asset)
+			mime, name, disposition = "image/webp", asset.ID+".webp", "inline"
+		} else {
+			data, err = e.images.read(asset)
+		}
 		if errors.Is(err, errImageBusy) {
 			return result(429, map[string]string{"error": "image readers busy; retry later"})
+		}
+		if err != nil && variant == "preview" {
+			return result(422, map[string]string{"error": err.Error()})
 		}
 		if err != nil {
 			_ = e.store.ImageFailed(recordID, id, "本地图片文件缺失或损坏，请重试服务端保存")
 			return result(410, map[string]string{"error": "archived image unavailable or integrity check failed"})
 		}
-		return wire.ManagementResponse{StatusCode: 200, Headers: http.Header{"Content-Type": {asset.MIME}, "Cache-Control": {"no-store"}, "X-Content-Type-Options": {"nosniff"}, "Content-Security-Policy": {"default-src 'none'; sandbox"}, "Cross-Origin-Resource-Policy": {"same-origin"}, "Content-Disposition": {"inline; filename=\"" + imageDownloadName(asset) + "\""}}, Body: data}
+		return wire.ManagementResponse{StatusCode: 200, Headers: http.Header{"Content-Type": {mime}, "Cache-Control": {"no-store"}, "X-Content-Type-Options": {"nosniff"}, "Content-Security-Policy": {"default-src 'none'; sandbox"}, "Cross-Origin-Resource-Policy": {"same-origin"}, "Content-Disposition": {disposition + "; filename=\"" + name + "\""}}, Body: data}
 	}
 	return result(404, map[string]string{"error": "image does not belong to this record"})
 }
