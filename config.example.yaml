@@ -1,0 +1,19 @@
+# Merge into the existing CPA config, do not replace provider/auth settings.
+# Legacy keys below also work with the examined CPA v8 compatibility loader.
+request-log: true
+usage-statistics-enabled: true
+plugins:
+  enabled: true
+  dir: plugins
+  configs:
+    request-recorder:
+      enabled: true
+      priority: -1000
+      db_path: data/request-recorder.db
+      # Set to CPA's actual log directory (same filesystem/container).
+      logs_dir: logs
+      retention_days: 30
+      max_records: 100000
+      max_body_bytes: 67108864
+      max_memory_bytes: 268435456
+      max_inflight: 256

@@ -1,0 +1,223 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>请求记录 · CPA</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <header>
+      <div class="brand">
+        <span class="brand-icon">◉</span>
+        <div><strong>请求记录</strong><small>REQUEST RECORDER</small></div>
+        <span class="version">CPA PLUGIN · 0.1</span>
+      </div>
+      <div class="actions">
+        <span id="connection" class="muted">未连接</span
+        ><button id="login-open">连接管理 API</button
+        ><button id="refresh" class="primary">↻ 刷新</button>
+      </div>
+    </header>
+    <main>
+      <section class="intro">
+        <div>
+          <span class="eyebrow">OBSERVABILITY / 请求追踪</span>
+          <h1>每次请求，都有迹可循。</h1>
+          <p>从原始上下文到最终输出，查看模型、耗时与工具调用的完整链路。</p>
+        </div>
+        <div id="health" class="health">等待连接</div>
+      </section>
+      <section class="stats" id="stats">
+        <div><span>筛选结果</span><strong>—</strong></div>
+        <div><span>本页成功率</span><strong>—</strong></div>
+        <div><span>本页平均耗时</span><strong>—</strong></div>
+        <div><span>本页 token 总量</span><strong>—</strong></div>
+      </section>
+      <section class="workspace">
+        <div class="toolbar">
+          <div class="section-title">
+            <span class="dot"></span>请求条目
+            <span id="total" class="count">0</span>
+          </div>
+          <div class="actions">
+            <label class="auto"
+              ><input type="checkbox" id="auto" />自动刷新</label
+            ><button id="alias-open">管理 key 别名</button>
+          </div>
+        </div>
+        <form id="filters" class="filters">
+          <input
+            name="q"
+            placeholder="搜索 key / 别名 / 模型 / 会话…"
+            class="search"
+            aria-label="搜索"
+          /><input
+            name="alias"
+            placeholder="Key 别名"
+            aria-label="Key 别名"
+          /><input name="model" placeholder="模型" aria-label="模型" /><select
+            name="outcome"
+            aria-label="请求状态"
+          >
+            <option value="">所有状态</option>
+            <option value="succeeded">成功</option>
+            <option value="failed">失败</option>
+            <option value="canceled">已中断</option>
+            <option value="rejected">已拒绝</option>
+            <option value="incomplete">未完整记录</option></select
+          ><button type="submit" class="primary">筛选</button
+          ><button type="reset">重置</button>
+          <details>
+            <summary>更多筛选</summary>
+            <div class="advanced">
+              <label
+                >提供商<input
+                  name="provider"
+                  placeholder="codex / claude…" /></label
+              ><label
+                >请求者 IP<input
+                  name="ip"
+                  placeholder="宿主提供时可用" /></label
+              ><label
+                >Key 指纹<input name="key_id" placeholder="SHA-256" /></label
+              ><label
+                >会话 ID<input
+                  name="session"
+                  placeholder="完整会话 ID" /></label
+              ><label
+                >思考深度<input
+                  name="reasoning"
+                  placeholder="high / medium…" /></label
+              ><label
+                >最小耗时 (ms)<input
+                  name="min_duration"
+                  type="number"
+                  min="0" /></label
+              ><label>起始时间<input name="from" type="datetime-local" /></label
+              ><label>结束时间<input name="to" type="datetime-local" /></label>
+            </div>
+          </details>
+        </form>
+        <div id="notice" class="notice" role="status" hidden></div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>时间 / 请求</th>
+                <th>请求者</th>
+                <th>模型 / 提供商</th>
+                <th>状态</th>
+                <th>首 token / 总耗时</th>
+                <th>Token / 缓存命中</th>
+                <th>上游原文</th>
+              </tr>
+            </thead>
+            <tbody id="rows"></tbody>
+          </table>
+        </div>
+        <div id="empty" class="empty">
+          <span>⌕</span>
+          <h3>连接后查看请求记录</h3>
+          <p>使用 CPA 管理密钥连接。密钥仅保存在当前页面内存中。</p>
+        </div>
+        <footer>
+          <span id="page-info">每页 50 条 · 仅显示已结束请求</span>
+          <div class="actions">
+            <button id="prev">← 上一页</button
+            ><button id="next">下一页 →</button>
+          </div>
+        </footer>
+      </section>
+      <p class="footnote">
+        采集范围：进入 CPA 请求拦截器的模型执行。上游原文需要开启 CPA
+        request-log 并配置 logs_dir；未知指标显示为 —。
+      </p>
+    </main>
+    <dialog id="login">
+      <form id="login-form">
+        <div class="dialog-title">
+          <h2>连接 CPA 管理 API</h2>
+          <button type="button" data-close="login" aria-label="关闭">✕</button>
+        </div>
+        <p>
+          CPAMC 的 iframe 不会自动传入管理密钥。请输入当前 CPA
+          的管理密钥，刷新页面后需重新连接。
+        </p>
+        <label
+          >管理密钥<input
+            id="management-key"
+            type="password"
+            autocomplete="off"
+            required
+            placeholder="Management secret key"
+        /></label>
+        <p id="login-error" class="error" role="alert"></p>
+        <button type="submit" class="primary">连接并加载</button>
+      </form>
+    </dialog>
+    <dialog id="alias-dialog">
+      <form id="alias-form">
+        <div class="dialog-title">
+          <h2>设置 key 别名</h2>
+          <button type="button" data-close="alias-dialog" aria-label="关闭">
+            ✕
+          </button>
+        </div>
+        <p>
+          可从条目详情直接绑定别名，或在这里输入 key。服务器仅保存 SHA-256
+          指纹和别名。
+        </p>
+        <label
+          >API key<input
+            id="alias-key"
+            type="password"
+            autocomplete="off" /></label
+        ><label>或 key 指纹<input id="alias-id" placeholder="SHA-256" /></label
+        ><label
+          >别名<input
+            id="alias-name"
+            maxlength="120"
+            placeholder="例如：开发机 / 张三；留空删除别名"
+        /></label>
+        <p id="alias-error" class="error" role="alert"></p>
+        <button class="primary" type="submit">保存别名</button>
+      </form>
+    </dialog>
+    <dialog id="detail" class="detail">
+      <div class="detail-head">
+        <div>
+          <span class="eyebrow">REQUEST INSPECTOR</span>
+          <h2 id="detail-title">请求详情</h2>
+          <div id="detail-sub" class="muted mono"></div>
+        </div>
+        <div class="actions">
+          <button id="export">↓ 导出 JSON</button
+          ><button data-close="detail" aria-label="关闭详情">✕</button>
+        </div>
+      </div>
+      <div id="detail-metrics" class="detail-metrics"></div>
+      <div class="tabs" role="tablist">
+        <button data-tab="conversation" class="selected" role="tab">
+          对话回放</button
+        ><button data-tab="request" role="tab">原请求</button
+        ><button data-tab="upstream" role="tab">上游原文</button
+        ><button data-tab="response" role="tab">下游响应</button
+        ><button data-tab="metadata" role="tab">元数据</button>
+      </div>
+      <div id="detail-body" class="detail-body"></div>
+    </dialog>
+    <dialog id="image-view" class="image-view">
+      <div class="dialog-title">
+        <h2>原始图片</h2>
+        <button data-close="image-view" aria-label="关闭原图">✕</button>
+      </div>
+      <img id="full-image" alt="原始图片" referrerpolicy="no-referrer" /><a
+        id="image-download"
+        download="original-image"
+        >下载内嵌原图</a
+      >
+    </dialog>
+    <script src="app.js" defer></script>
+  </body>
+</html>
