@@ -100,6 +100,7 @@ jobs:
         with:
           python-version: '3.12'
       - name: Set up MinGW
+        id: msys2
         if: runner.os == 'Windows'
         uses: msys2/setup-msys2@v2
         with:
@@ -109,7 +110,20 @@ jobs:
           install: mingw-w64-x86_64-gcc
       - name: Select Windows C compiler
         if: runner.os == 'Windows'
-        run: echo 'CC=C:/msys64/mingw64/bin/gcc.exe' >> "$GITHUB_ENV"
+        env:
+          MSYS2_LOCATION: ${{ steps.msys2.outputs.msys2-location }}
+        run: |
+          python - <<'PYTHON'
+          import os
+          from pathlib import Path
+          compiler_dir = Path(os.environ['MSYS2_LOCATION']) / 'mingw64' / 'bin'
+          compiler = compiler_dir / 'gcc.exe'
+          assert compiler.is_file(), compiler
+          with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as f:
+              f.write('CC=' + compiler.as_posix() + '\n')
+          with open(os.environ['GITHUB_PATH'], 'a', encoding='utf-8') as f:
+              f.write(str(compiler_dir) + '\n')
+          PYTHON
       - name: Test and package native plugin
         run: |
           go test -race ./...
