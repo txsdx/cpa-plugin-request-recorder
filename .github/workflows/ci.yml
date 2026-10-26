@@ -1,0 +1,28 @@
+name: Validate plugin
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: go test -race ./...
+      - run: go vet ./...
+      - run: node --check web/app.js
+      - run: make package
+      - uses: actions/upload-artifact@v4
+        with:
+          name: request-recorder-linux-amd64
+          path: |
+            dist/*.zip
+            dist/checksums.txt
