@@ -1,0 +1,17 @@
+# 接口研究与开源参考
+
+本项目使用本地最小 wire DTO 和 C ABI，不依赖整个 CPA 服务端 Go module，也不引入其他插件的计费或 provider 实现。
+
+| 参考项目 / 文件 | 确认的事实 / 本项目取舍 |
+| --- | --- |
+| [CLIProxyAPI 官方插件示例](https://github.com/router-for-me/CLIProxyAPI/tree/307803510bce87f986fcf7b1a84190f105c7b4aa/examples/plugin)；request-lifecycle、response-interceptor、stream-interceptor、management-api 示例 | c-shared ABI v1、RPC envelope、注册与事件方法名；只观察，不改写、不终止、不丢弃请求或响应 |
+| [sdk/pluginapi/types.go](https://github.com/router-for-me/CLIProxyAPI/blob/307803510bce87f986fcf7b1a84190f105c7b4aa/sdk/pluginapi/types.go) / [sdk/pluginabi/types.go](https://github.com/router-for-me/CLIProxyAPI/blob/307803510bce87f986fcf7b1a84190f105c7b4aa/sdk/pluginabi/types.go) | schema 2 引入 lifecycle；3 / 5 减少 stream payload 请求/历史拷贝；6 保留 management JSON 原文。使用 schema 6，不能假定旧版本具备接口 |
+| [internal/pluginhost/management.go](https://github.com/router-for-me/CLIProxyAPI/blob/307803510bce87f986fcf7b1a84190f105c7b4aa/internal/pluginhost/management.go) | 管理路由相对 `/v0/management`，不是相对插件；资源路由相对插件资源前缀。资源**没有管理鉴权**，不能用于返回请求数据 |
+| [internal/logging/requestid.go](https://github.com/router-for-me/CLIProxyAPI/blob/307803510bce87f986fcf7b1a84190f105c7b4aa/internal/logging/requestid.go) 与 request_logger_format.go、runtime/executor/helps/logging_helpers.go | 文件名使用完整 trace 的**末尾 8 位**；日志保留 API REQUEST / API RESPONSE 多次尝试，不能把最终下游 RESPONSE 当上游原文 |
+| [CPAMC PluginResourcePage](https://github.com/router-for-me/Cli-Proxy-API-Management-Center/blob/714de0760a3ce86094b178fb46f834d34bc4a2a5/src/features/plugins/PluginResourcePage.tsx) / pluginResources.ts | 菜单资源在 iframe 加载，没有管理密钥 postMessage 桥接。本项目自行以内存保存管理密钥，不读取父页面存储 |
+| [Willxup/cpa-plugin-usage-keeper](https://github.com/Willxup/cpa-plugin-usage-keeper) | 参考资源菜单和 iframe 入口；Keeper 是外部应用嵌入，本项目改用二进制内嵌静态 GUI，减少部署组件 |
+| [origin652/cpa-plugin-key-policy](https://github.com/origin652/cpa-plugin-key-policy) | 参考管理 API 与内嵌 UI、usage 接入；自定义认证插件的 usage.APIKey 可能是 Principal / key ID，不保证是客户端原始 key |
+| [rheodev/cpa-plugin-privacyfilter](https://github.com/rheodev/cpa-plugin-privacyfilter) | 参考 before/after request hooks 的语义：after-auth 仍是协议转换前正文；不能把它标为真实 outbound request |
+| [mmqz/cpa-multi-plugins](https://github.com/mmqz/cpa-multi-plugins) | 参考插件库打包形态和插件商店单库 zip + checksums.txt 约定 |
+
+真实宿主测试发现当前 CPA 的 lifecycle RequestID 和 UsageReporter RequestID 可以不同。因此用量优先匹配 exact ID，再按**完整 TraceID**唯一关联，必要时以模型排除候选；存在歧义时保留待匹配状态，不将 A 的 key 或 token 写到 B 的记录。回归测试覆盖这两类 ID 差异、并发隔离及重试 usage 去重。

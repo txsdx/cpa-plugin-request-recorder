@@ -1,0 +1,71 @@
+# 设计与数据边界
+
+目标是可检查、可回放的请求档案：任何“原文”“耗时”“完整”的标签，都对应实际采集来源。
+
+```mermaid
+flowchart LR
+  Client[下游客户端] --> CPA[CPA 模型请求]
+  CPA --> B[before / after request hooks]
+  CPA --> U[上游执行与协议转换]
+  U --> R[nonstream / stream response hooks]
+  R --> Client
+  B --> A[按生命周期 RequestID 暂存]
+  R --> A
+  CPA --> C[request.complete]
+  C --> DB[(本地 bbolt)]
+  CPA --> Usage[usage.handle]
+  Usage --> Join[RequestID 优先 / 完整 TraceID 唯一关联]
+  Join --> DB
+  U --> Logs[CPA request-log]
+  Logs --> Enrich[末尾8位 trace 关联 / 稳定文件检测]
+  Enrich --> DB
+  DB --> API[CPA 鉴权管理 API]
+  API --> GUI[CPAMC 资源 iframe 内嵌 GUI]
+```
+
+## 请求标识与生命周期
+
+- lifecycle RequestID 作为条目 ID，完整 TraceID 保留以关联入口请求和多次上游尝试。
+- before-auth 抓取当时的正文；响应 hook 的 OriginalRequest 存在时采用宿主原始请求副本。after-auth 的正文另存，绝不假定它是执行器翻译后的真正上游请求。
+- header-init stream 事件用来缓存原请求与头部，不把它视为首分片；payload chunk 按顺序拼接。结束、失败、拒绝和取消以 terminal callback 为准。
+- usage 回调可以先于或后于 completion，且 UsageReporter RequestID 可能不同。使用完整 TraceID 唯一匹配；同 trace 下多个同模型执行时不猜测归属。
+- usage_attempts 按 reporter ID 去重，token 聚合包括重试尝试。缓存读取比例：OpenAI / Gemini 为 cache-read / input；原生 Claude 为 cache-read / (uncached input + cache read + cache creation)。原始计数同时保留。总耗时取 lifecycle 开始/结束，TTFT 取宿主 usage 数据，首分片耗时单独显示。
+- 记录显示为“已结束”不等于“响应采集完整”。中断保留已有正文，超限保留部分并附提示。
+
+## 上游原文
+
+当前公开 response interceptor 观察的是翻译后的执行响应，无法直接获得所有提供商的原始 HTTP/SSE 数据。response normalizer 没有可靠 request ID，不适合用全局变量拼接不同并发请求。
+
+采用 CPA 自己的 request-log，通过 trace 关联后保存全部 `API REQUEST n` 和 `API RESPONSE n` 区段；对话视图额外解析最后一次尝试，原文页签保留所有尝试。
+
+补全工作在后台执行，文件读取不持有分片采集锁；等待大小稳定且存在最终 `RESPONSE` 区段。30 秒未能补全则明确标为不可用。短 trace 碰撞多个日志时拒绝关联。单日志最大读取限制为 `4 × max_body_bytes`，日志已有截断标记时传递为“有截断”。
+
+这些数据是 **CPA 记录的文本日志**，可能脱敏、重排头部、去掉边界换行，文本分隔符也不是无歧义字节协议；不称作原始 TLS/HTTP 网络抓包。若要求任何提供商、任何版本的严格字节级上游原文，需要宿主提供带 RequestID 的 upstream observer / transport tee 新接口。
+
+## GUI 与多模态
+
+采用无构建依赖的 HTML/CSS/JS，随 Go 动态库 embed，资源路径按 CPA/CPAMC 官方约定注册。
+
+对话解析不执行记录中的 HTML / JS，不自动执行工具调用，不自动发送对话。文本用 DOM textContent 展示。工具保留调用 ID，已有对应结果才展示结果。Responses 最终完整快照优先于增量事件，避免重复拼接。
+
+图片支持协议中的原始 data URL / base64 / HTTP(S) URL。内嵌图片使用原数据预览和放大，下载不转码；远程图片须主动点击加载，不会把管理 Authorization 发送给图片服务，也不向图片服务发送 referrer。不自动下载远端资源或跟随图片内容执行脚本。非图片附件及不能识别的字段仍可查看原文。
+
+不会根据相似文本把不同请求自动串成一个会话。单次请求携带的 messages/input/contents 即该条目的历史；session_id 用于筛选相关请求。`previous_response_id` 的服务端历史、压缩掉的上下文或上游未暴露的思考不能从本记录中恢复。
+
+## 持久化、容量与故障
+
+- bbolt 事务保存正文、摘要、时间索引、trace 索引；列表只读摘要，详情才读取正文。
+- key 别名按指纹动态关联，因此修改别名会反映到历史记录。认证插件的 APIKey 字段可能是主体 ID，需按宿主实际暴露的标识绑定。
+- 采集中正文受单体大小、总内存预算和并发数限制。达到上限可截断或跳过新采集，不更改客户端响应；status 暴露丢弃数。内存预算不包括 Go runtime、JSON 编解码、bbolt mmap 和后台日志导入，不能当作进程 RSS 上限。
+- 采集中的正文暂存在内存，正常关闭时写 incomplete；进程崩溃/强杀前未终结的请求可能丢失。这一版不是逐分片 fsync 的审计系统。
+- 记录已写入但待补全的日志任务会在进程重启时从数据库 pending 标记重新排队，再尝试补全 30 秒；队列上限 4096。
+- 最大 30 分钟等待 terminal callback，超时保存 incomplete。存储失败会在 status 和宿主日志中报告。
+- 保留期限/数量定期删除记录，不删除 CPA 源日志，不擦除磁盘旧页，不自动 compact。不能把此保留策略当作安全擦除。
+
+## 目前的宿主限制
+
+1. 只覆盖进入 request interceptor 的模型执行。入口鉴权失败、路由前错误不一定有 callback；不能承诺记录所有下游 HTTP 请求。
+2. 不能从现有 hook 强行取得客户端 socket IP；只采用宿主元数据中的 client_ip / resolved_client_ip，不擅自信任 X-Forwarded-For。当前实际验证宿主未向插件暴露 IP，UI 显示未知。
+3. Native WebSocket observer、二进制 multipart 上传和其他未列出的协议尚未实现。它们不能因普通 HTTP 测试通过就视为支持。
+4. 后续插件 / 宿主在 response hook 后仍可修改数据。插件优先级只能控制观察位置，不能取代最外层 HTTP tee。若要保证“客户端实际收到的逐字节响应”，需要宿主新增最终输出 observer。
+5. 发布到插件商店、GitHub Release、多平台装载验证与真实上游账号验证不包含在本轮本地模拟测试中。
