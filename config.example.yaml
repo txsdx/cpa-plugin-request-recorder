@@ -12,6 +12,15 @@ plugins:
       db_path: data/request-recorder.db
       # Set to CPA's actual log directory (same filesystem/container).
       logs_dir: logs
+      # Empty derives data/request-recorder-images/ from db_path.
+      images_dir: ""
+      archive_remote_images: true
+      max_image_bytes: 20971520
+      max_image_storage_bytes: 2147483648
+      max_image_files: 100000
+      max_images_per_record: 64
+      image_workers: 2
+      image_download_timeout_seconds: 20
       retention_days: 30
       max_records: 100000
       max_body_bytes: 67108864

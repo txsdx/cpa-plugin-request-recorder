@@ -44,6 +44,7 @@ type Summary struct {
 }
 type Record struct {
 	Summary
+	Images            []ImageAsset   `json:"images,omitempty"`
 	UsageAttempts     []UsageAttempt `json:"usage_attempts,omitempty"`
 	RequestBody       string         `json:"request_body"`
 	RequestSource     string         `json:"request_source"`

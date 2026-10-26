@@ -123,6 +123,18 @@ plugins:
             assert item['key_id']==hashlib.sha256(KEY.encode()).hexdigest(),item
             d=json.loads(request('/v0/management/plugins/request-recorder/record?id='+item['id']))
             assert IMAGE in d['record']['request_body']
+            for _ in range(100):
+                state=json.loads(request('/v0/management/plugins/request-recorder/images?record_id='+item['id']))
+                if state['images'] and all(im['status']=='ready' for im in state['images']): break
+                time.sleep(.05)
+            assert state['images'] and all(im['status']=='ready' for im in state['images']),state
+            image=state['images'][0]
+            image_path='/v0/management/plugins/request-recorder/image?record_id='+item['id']+'&id='+image['id']
+            assert request(image_path)==base64.b64decode(PNG)
+            try: request(image_path,key=None)
+            except urllib.error.HTTPError as e: assert e.code in (401,403)
+            else: raise AssertionError('public image access allowed')
+            assert (work/'recorder-images'/(image['hash']+'.img')).read_bytes()==base64.b64decode(PNG)
             assert IMAGE in d['record']['upstream_requests']
             assert 'API RESPONSE 1' in d['record']['upstream_responses']
             if item['stream']:
@@ -131,11 +143,18 @@ plugins:
             else:
                 assert any(m.get('images') for m in d['conversation'] if m['source']=='request')
                 assert any(m.get('images') for m in d['upstream_conversation']),d['upstream_conversation']
+        key_id=hashlib.sha256(KEY.encode()).hexdigest()
+        sync=json.loads(request('/v0/management/plugins/request-recorder/aliases/sync',{'aliases':{key_id:'CPAMC 自动备注'}}))
+        assert sync['synced']==1 and sync['manual_aliases_preserved']
+        assert json.loads(request('/v0/management/plugins/request-recorder/records?alias=CPAMC'))['total']==2
+        try: request('/v0/management/plugins/request-recorder/aliases/sync',{'aliases':{}},key=None)
+        except urllib.error.HTTPError as e: assert e.code in (401,403),e.code
+        else: raise AssertionError('unauthenticated alias sync allowed')
         alias=json.loads(request('/v0/management/plugins/request-recorder/aliases',{'key':KEY,'alias':'集成测试'}))
         assert alias['ok']
         page=json.loads(request('/v0/management/plugins/request-recorder/records?alias='+urllib.parse.quote('集成测试')))
         assert page['total']==2
-        print(json.dumps({'result':'PASS','records':2,'stream_chunks':160,'checks':['native CPA loading','public GUI registration','management authentication','nonstream and SSE capture','usage join','upstream log enrichment','input and output images','alias filtering'],'workdir':str(work),'port':port},ensure_ascii=False))
+        print(json.dumps({'result':'PASS','records':2,'stream_chunks':160,'checks':['native CPA loading','public GUI registration','management authentication','nonstream and SSE capture','usage join','upstream log enrichment','input and output images','authenticated local image archive','image file persistence','CPAMC alias sync authentication','alias filtering'],'workdir':str(work),'port':port},ensure_ascii=False))
         if os.environ.get('KEEP_RUNNING')=='1':
             print('KEEP_RUNNING: press Ctrl+C to stop',flush=True)
             while proc.poll() is None: time.sleep(1)

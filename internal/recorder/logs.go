@@ -172,4 +172,5 @@ func (e *Engine) enrich(id string, j *logJob) {
 		return
 	}
 	delete(e.jobs, id)
+	e.images.enqueue(id)
 }

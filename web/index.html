@@ -119,7 +119,10 @@
         <div id="empty" class="empty">
           <span>⌕</span>
           <h3>连接后查看请求记录</h3>
-          <p>使用 CPA 管理密钥连接。密钥仅保存在当前页面内存中。</p>
+          <p>
+            使用 CPA 管理密钥连接。同源 CPAMC
+            已保存登录时自动连接；插件不另存密钥。
+          </p>
         </div>
         <footer>
           <span id="page-info">每页 50 条 · 仅显示已结束请求</span>
@@ -141,8 +144,8 @@
           <button type="button" data-close="login" aria-label="关闭">✕</button>
         </div>
         <p>
-          CPAMC 的 iframe 不会自动传入管理密钥。请输入当前 CPA
-          的管理密钥，刷新页面后需重新连接。
+          同源 CPAMC 已保存管理密钥时会自动连接。无法读取时，请输入当前 CPA
+          的管理密钥。此处登录仅用于查看，后台记录持续运行；插件不另存密钥。
         </p>
         <label
           >管理密钥<input

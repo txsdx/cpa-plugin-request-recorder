@@ -14,19 +14,33 @@ import (
 )
 
 type Config struct {
-	DBPath         string `yaml:"db_path"`
-	LogsDir        string `yaml:"logs_dir"`
-	RetentionDays  int    `yaml:"retention_days"`
-	MaxRecords     int    `yaml:"max_records"`
-	MaxBodyBytes   int    `yaml:"max_body_bytes"`
-	MaxInflight    int    `yaml:"max_inflight"`
-	MaxMemoryBytes int    `yaml:"max_memory_bytes"`
+	MaxImageFiles               int    `yaml:"max_image_files"`
+	ImagesDir                   string `yaml:"images_dir"`
+	ArchiveRemoteImages         bool   `yaml:"archive_remote_images"`
+	MaxImageBytes               int64  `yaml:"max_image_bytes"`
+	MaxImageStorageBytes        int64  `yaml:"max_image_storage_bytes"`
+	MaxImagesPerRecord          int    `yaml:"max_images_per_record"`
+	ImageWorkers                int    `yaml:"image_workers"`
+	ImageDownloadTimeoutSeconds int    `yaml:"image_download_timeout_seconds"`
+	DBPath                      string `yaml:"db_path"`
+	LogsDir                     string `yaml:"logs_dir"`
+	RetentionDays               int    `yaml:"retention_days"`
+	MaxRecords                  int    `yaml:"max_records"`
+	MaxBodyBytes                int    `yaml:"max_body_bytes"`
+	MaxInflight                 int    `yaml:"max_inflight"`
+	MaxMemoryBytes              int    `yaml:"max_memory_bytes"`
 }
 
 func DefaultConfig() Config {
-	return Config{DBPath: "data/request-recorder.db", RetentionDays: 30, MaxRecords: 100000, MaxBodyBytes: 64 << 20, MaxInflight: 256, MaxMemoryBytes: 256 << 20}
+	return Config{ArchiveRemoteImages: true, MaxImageFiles: 100000, MaxImageBytes: 20 << 20, MaxImageStorageBytes: 2 << 30, MaxImagesPerRecord: 64, ImageWorkers: 2, ImageDownloadTimeoutSeconds: 20, DBPath: "data/request-recorder.db", RetentionDays: 30, MaxRecords: 100000, MaxBodyBytes: 64 << 20, MaxInflight: 256, MaxMemoryBytes: 256 << 20}
 }
 func (c Config) Validate() error {
+	if c.MaxImageFiles < 1 || c.MaxImageFiles > 1000000 {
+		return errors.New("max_image_files must be 1..1000000")
+	}
+	if c.MaxImageBytes < 1024 || c.MaxImageBytes > 64<<20 || c.MaxImageStorageBytes < c.MaxImageBytes || c.MaxImagesPerRecord < 1 || c.MaxImagesPerRecord > 128 || c.ImageWorkers < 1 || c.ImageWorkers > 8 || c.ImageDownloadTimeoutSeconds < 1 || c.ImageDownloadTimeoutSeconds > 120 {
+		return errors.New("invalid image limits: image bytes 1KiB..64MiB; storage >= one image; images/record 1..128; workers 1..8; timeout 1..120s")
+	}
 	if c.DBPath == "" || c.RetentionDays < 0 || c.MaxRecords < 0 || c.MaxBodyBytes < 1024 || c.MaxInflight < 1 || c.MaxMemoryBytes < c.MaxBodyBytes {
 		return errors.New("invalid config: db_path required; retention/max_records >= 0; max_body_bytes >= 1024; max_inflight >= 1; max_memory_bytes >= max_body_bytes")
 	}
@@ -46,6 +60,7 @@ type logJob struct {
 	stable            int
 }
 type Engine struct {
+	images       *imageArchive
 	mu           sync.Mutex
 	store        *Store
 	cfg          Config
@@ -82,12 +97,19 @@ func New(c Config) (*Engine, error) {
 	for _, r := range pending {
 		e.jobs[r.ID] = &logJob{trace: r.TraceID, started: r.StartedAt, deadline: time.Now().Add(30 * time.Second)}
 	}
+	e.images, err = newImageArchive(c, s)
+	if err != nil {
+		s.Close()
+		return nil, err
+	}
+	e.images.start()
 	go e.maintain()
 	return e, nil
 }
 func (e *Engine) Close() error {
 	close(e.stop)
 	<-e.done
+	imageErr := e.images.close()
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	for id, a := range e.active {
@@ -98,7 +120,7 @@ func (e *Engine) Close() error {
 		e.persist(a)
 		delete(e.active, id)
 	}
-	return e.store.Close()
+	return errors.Join(imageErr, e.store.Close())
 }
 func (e *Engine) error(err error) {
 	if err != nil {
@@ -470,6 +492,7 @@ func (e *Engine) Complete(c wire.Completion) error {
 	}
 	e.used -= a.size
 	delete(e.active, c.RequestID)
+	e.images.enqueue(c.RequestID)
 	if e.cfg.LogsDir != "" {
 		if len(e.jobs) < 4096 {
 			e.jobs[c.RequestID] = &logJob{trace: r.TraceID, started: r.StartedAt, deadline: time.Now().Add(30 * time.Second)}
@@ -536,7 +559,11 @@ func (e *Engine) maintain() {
 func (e *Engine) Status() map[string]any {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	return map[string]any{"active": len(e.active), "pending_logs": len(e.jobs), "unmatched_usage": len(e.pendingUsage), "dropped_requests": e.dropped, "memory_bytes": e.used, "last_error": e.lastError, "logs_enabled": e.cfg.LogsDir != "", "db_path": e.cfg.DBPath, "retention_days": e.cfg.RetentionDays, "max_body_bytes": e.cfg.MaxBodyBytes, "capture_scope": "model executions reaching CPA request interceptors"}
+	status := map[string]any{"active": len(e.active), "pending_logs": len(e.jobs), "unmatched_usage": len(e.pendingUsage), "dropped_requests": e.dropped, "memory_bytes": e.used, "last_error": e.lastError, "logs_enabled": e.cfg.LogsDir != "", "db_path": e.cfg.DBPath, "retention_days": e.cfg.RetentionDays, "max_body_bytes": e.cfg.MaxBodyBytes, "capture_scope": "model executions reaching CPA request interceptors"}
+	for key, value := range e.images.status() {
+		status[key] = value
+	}
+	return status
 }
 func (e *Engine) Get(id string) (*Record, error) { return e.store.Get(id) }
 func (e *Engine) List(f Filter) (Page, error)    { return e.store.List(f) }

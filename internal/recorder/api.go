@@ -17,13 +17,21 @@ const APIBase = "/v0/management/plugins/" + PluginID
 const ResourceBase = "/v0/resource/plugins/" + PluginID
 
 // Version is injected from the validated release tag by the build.
-var Version = "0.1.0"
+var Version = "0.2.0"
 
 func Registration() map[string]any {
 	return map[string]any{"schema_version": 6, "metadata": map[string]any{
 		"Name": PluginID, "Version": Version, "Author": "txsdx", "GitHubRepository": "https://github.com/txsdx/cpa-plugin-request-recorder",
 		"ConfigFields": []map[string]string{
 			{"Name": "db_path", "Type": "string", "Description": "持久化数据库路径，变更需重启"},
+			{"Name": "images_dir", "Type": "string", "Description": "图片归档目录，默认数据库旁的 <数据库名>-images"},
+			{"Name": "archive_remote_images", "Type": "boolean", "Description": "由服务器下载并保存公网 HTTPS 图片"},
+			{"Name": "max_image_files", "Type": "integer", "Description": "图片缓存最大文件数（防止大量小图耗尽 inode）"},
+			{"Name": "max_image_bytes", "Type": "integer", "Description": "单张图片最大字节数"},
+			{"Name": "max_image_storage_bytes", "Type": "integer", "Description": "图片归档总容量上限"},
+			{"Name": "max_images_per_record", "Type": "integer", "Description": "每条记录最多归档图片数"},
+			{"Name": "image_workers", "Type": "integer", "Description": "后台图片下载并发数"},
+			{"Name": "image_download_timeout_seconds", "Type": "integer", "Description": "单张图片下载超时秒数"},
 			{"Name": "logs_dir", "Type": "string", "Description": "CPA request-log 目录，用于关联上游原文"},
 			{"Name": "retention_days", "Type": "integer", "Description": "保留天数，0 不按时间清理"},
 			{"Name": "max_records", "Type": "integer", "Description": "最多条目数，0 不限制"},
@@ -35,7 +43,7 @@ func Registration() map[string]any {
 }
 func ManagementRegistration() map[string]any {
 	routes := []map[string]string{}
-	for _, p := range [][2]string{{"GET", "/records"}, {"GET", "/record"}, {"GET", "/status"}, {"POST", "/aliases"}} {
+	for _, p := range [][2]string{{"GET", "/records"}, {"GET", "/record"}, {"GET", "/status"}, {"GET", "/image"}, {"GET", "/images"}, {"POST", "/aliases"}, {"POST", "/aliases/sync"}, {"POST", "/images/retry"}} {
 		routes = append(routes, map[string]string{"Method": p[0], "Path": APIBase + p[1]})
 	}
 	return map[string]any{"Routes": routes, "Resources": []map[string]string{
@@ -68,7 +76,7 @@ func (e *Engine) Management(req wire.ManagementRequest, web fs.FS) wire.Manageme
 		if err != nil {
 			return result(500, map[string]string{"error": "asset unavailable"})
 		}
-		return wire.ManagementResponse{StatusCode: 200, Headers: http.Header{"Content-Type": {mime}, "Cache-Control": {"no-store"}, "X-Content-Type-Options": {"nosniff"}, "Content-Security-Policy": {"default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: https: http:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'"}, "Referrer-Policy": {"no-referrer"}}, Body: b}
+		return wire.ManagementResponse{StatusCode: 200, Headers: http.Header{"Content-Type": {mime}, "Cache-Control": {"no-store"}, "X-Content-Type-Options": {"nosniff"}, "Content-Security-Policy": {"default-src 'self'; script-src 'self'; style-src 'self'; img-src blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'"}, "Referrer-Policy": {"no-referrer"}}, Body: b}
 	}
 	if !strings.HasPrefix(req.Path, APIBase+"/") {
 		return result(404, map[string]string{"error": "not found"})
@@ -110,8 +118,72 @@ func (e *Engine) Management(req wire.ManagementRequest, web fs.FS) wire.Manageme
 			if err != nil {
 				return result(500, map[string]string{"error": "database read failed"})
 			}
-			return result(200, map[string]any{"record": r, "conversation": Conversation(r.RequestBody, r.ResponseBody), "upstream_conversation": UpstreamConversation(r)})
+			messages := Conversation(r.RequestBody, r.ResponseBody)
+			upstream := UpstreamConversation(r)
+			if r.Images == nil {
+				if !e.images.pending(r.ID) {
+					e.images.enqueue(r.ID)
+				}
+			} else {
+				for _, im := range r.Images {
+					if im.Status == "pending" || im.Status == "ready" && !e.images.exists(im.Hash) {
+						if !e.images.pending(r.ID) {
+							e.images.enqueue(r.ID)
+						}
+						break
+					}
+				}
+			}
+			e.images.decorate(messages, r.Images)
+			e.images.decorate(upstream, r.Images)
+			return result(200, map[string]any{"record": r, "conversation": messages, "upstream_conversation": upstream})
+		case "/images":
+			id := req.Query.Get("record_id")
+			assets, err := e.store.GetImages(id)
+			if err != nil {
+				return result(404, map[string]string{"error": "record not found"})
+			}
+			needs := len(assets) == 0
+			for _, asset := range assets {
+				if asset.Status == "pending" {
+					needs = true
+				}
+			}
+			if needs && !e.images.pending(id) {
+				e.images.enqueue(id)
+			}
+			return result(200, map[string]any{"images": assets, "pending": e.images.pending(id), "limit": e.cfg.MaxImagesPerRecord})
+		case "/image":
+			return e.imageResponse(req)
 		}
+	}
+	if req.Method == "POST" && path == "/images/retry" {
+		id := req.Query.Get("record_id")
+		if len(id) == 0 || len(id) > 256 {
+			return result(400, map[string]string{"error": "invalid record_id"})
+		}
+		if err := e.images.retry(id); err != nil {
+			if errors.Is(err, ErrNotFound) {
+				return result(404, map[string]string{"error": "record not found"})
+			}
+			return result(503, map[string]string{"error": err.Error()})
+		}
+		return result(202, map[string]bool{"queued": true})
+	}
+	if req.Method == "POST" && path == "/aliases/sync" {
+		if len(req.Body) > 2<<20 {
+			return result(413, map[string]string{"error": "body too large"})
+		}
+		var body struct {
+			Aliases map[string]string `json:"aliases"`
+		}
+		if json.Unmarshal(req.Body, &body) != nil || body.Aliases == nil {
+			return result(400, map[string]string{"error": "aliases object required"})
+		}
+		if err := e.store.SyncPanelAliases(body.Aliases); err != nil {
+			return result(400, map[string]string{"error": err.Error()})
+		}
+		return result(200, map[string]any{"synced": len(body.Aliases), "manual_aliases_preserved": true})
 	}
 	if req.Method == "POST" && path == "/aliases" {
 		if len(req.Body) > 8192 {
@@ -131,4 +203,33 @@ func (e *Engine) Management(req wire.ManagementRequest, web fs.FS) wire.Manageme
 		return result(200, map[string]bool{"ok": true})
 	}
 	return result(404, map[string]string{"error": "not found"})
+}
+
+func (e *Engine) imageResponse(req wire.ManagementRequest) wire.ManagementResponse {
+	id, recordID := req.Query.Get("id"), req.Query.Get("record_id")
+	if !validSHA256(id) || len(recordID) == 0 || len(recordID) > 256 {
+		return result(400, map[string]string{"error": "invalid image reference"})
+	}
+	assets, err := e.store.GetImages(recordID)
+	if err != nil {
+		return result(404, map[string]string{"error": "record not found"})
+	}
+	for _, asset := range assets {
+		if asset.ID != id {
+			continue
+		}
+		if asset.Status != "ready" {
+			return result(409, map[string]string{"error": "image is not archived", "status": asset.Status})
+		}
+		data, err := e.images.read(asset)
+		if errors.Is(err, errImageBusy) {
+			return result(429, map[string]string{"error": "image readers busy; retry later"})
+		}
+		if err != nil {
+			_ = e.store.ImageFailed(recordID, id, "本地图片文件缺失或损坏，请重试服务端保存")
+			return result(410, map[string]string{"error": "archived image unavailable or integrity check failed"})
+		}
+		return wire.ManagementResponse{StatusCode: 200, Headers: http.Header{"Content-Type": {asset.MIME}, "Cache-Control": {"no-store"}, "X-Content-Type-Options": {"nosniff"}, "Content-Security-Policy": {"default-src 'none'; sandbox"}, "Cross-Origin-Resource-Policy": {"same-origin"}, "Content-Disposition": {"inline; filename=\"" + imageDownloadName(asset) + "\""}}, Body: data}
+	}
+	return result(404, map[string]string{"error": "image does not belong to this record"})
 }

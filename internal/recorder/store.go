@@ -19,7 +19,10 @@ var records = []byte("records")
 var summaries = []byte("summaries")
 var ordering = []byte("time")
 var aliases = []byte("aliases")
+var panelAliases = []byte("panel_aliases")
 var traces = []byte("traces")
+var imageAssets = []byte("images")
+var imageJobs = []byte("image_jobs")
 
 type Store struct{ db *bolt.DB }
 
@@ -33,7 +36,7 @@ func Open(path string) (*Store, error) {
 	}
 	s := &Store{db}
 	err = db.Update(func(tx *bolt.Tx) error {
-		for _, name := range [][]byte{records, summaries, ordering, aliases, traces} {
+		for _, name := range [][]byte{records, summaries, ordering, aliases, panelAliases, traces, imageAssets, imageJobs} {
 			if _, e := tx.CreateBucketIfNotExists(name); e != nil {
 				return e
 			}
@@ -70,9 +73,16 @@ func (s *Store) Save(r *Record) error {
 				}
 			}
 		}
+		// Persist image work in the same transaction as the body. A full memory
+		// queue or a crash before scheduling must not lose archival work.
+		if err := tx.Bucket(imageJobs).Put(id, []byte{1}); err != nil {
+			return err
+		}
 		// Aliases are joined at read time, so edits apply to historical records too.
 		r.KeyAlias = ""
-		raw, err := json.Marshal(r)
+		stored := *r
+		stored.Images = nil
+		raw, err := json.Marshal(&stored)
 		if err != nil {
 			return err
 		}
@@ -99,7 +109,12 @@ func (s *Store) Get(id string) (*Record, error) {
 		if e := json.Unmarshal(b, &r); e != nil {
 			return e
 		}
-		r.KeyAlias = string(tx.Bucket(aliases).Get([]byte(r.KeyID)))
+		if raw := tx.Bucket(imageAssets).Get([]byte(id)); raw != nil {
+			if err := json.Unmarshal(raw, &r.Images); err != nil {
+				return err
+			}
+		}
+		r.KeyAlias = resolvedAlias(tx, r.KeyID)
 		return nil
 	})
 	return &r, err
@@ -133,7 +148,7 @@ func (s *Store) List(f Filter) (Page, error) {
 			if err := json.Unmarshal(tx.Bucket(summaries).Get(v), &r); err != nil {
 				return err
 			}
-			r.KeyAlias = string(tx.Bucket(aliases).Get([]byte(r.KeyID)))
+			r.KeyAlias = resolvedAlias(tx, r.KeyID)
 			if !f.From.IsZero() && r.StartedAt.Before(f.From) {
 				continue
 			}
@@ -193,6 +208,12 @@ func (s *Store) Prune(days, max int) error {
 				break
 			}
 			id := append([]byte(nil), v...)
+			if err := tx.Bucket(imageJobs).Delete(id); err != nil {
+				return err
+			}
+			if err := tx.Bucket(imageAssets).Delete(id); err != nil {
+				return err
+			}
 			if err := tx.Bucket(traces).Delete([]byte(r.TraceID + "\x00" + r.ID)); err != nil {
 				return err
 			}
@@ -249,4 +270,132 @@ func (s *Store) PendingLogs() ([]Summary, error) {
 		})
 	})
 	return out, err
+}
+
+// Image metadata is separate from large request bodies. Download progress updates
+// cannot overwrite concurrent usage/log enrichment or rewrite multi-MiB bodies.
+func (s *Store) GetImages(id string) ([]ImageAsset, error) {
+	out := []ImageAsset{}
+	err := s.db.View(func(tx *bolt.Tx) error {
+		if tx.Bucket(records).Get([]byte(id)) == nil {
+			return ErrNotFound
+		}
+		if raw := tx.Bucket(imageAssets).Get([]byte(id)); raw != nil {
+			return json.Unmarshal(raw, &out)
+		}
+		return nil
+	})
+	return out, err
+}
+func (s *Store) SetImages(id string, assets []ImageAsset) error {
+	raw, err := json.Marshal(assets)
+	if err != nil {
+		return err
+	}
+	return s.db.Update(func(tx *bolt.Tx) error {
+		if tx.Bucket(records).Get([]byte(id)) == nil {
+			return ErrNotFound
+		}
+		return tx.Bucket(imageAssets).Put([]byte(id), raw)
+	})
+}
+func (s *Store) ImageReferences() (map[string]bool, error) {
+	refs := map[string]bool{}
+	err := s.db.View(func(tx *bolt.Tx) error {
+		return tx.Bucket(imageAssets).ForEach(func(_, raw []byte) error {
+			var images []ImageAsset
+			if err := json.Unmarshal(raw, &images); err != nil {
+				return err
+			}
+			for _, im := range images {
+				if im.Status == "ready" {
+					refs[im.Hash] = true
+				}
+			}
+			return nil
+		})
+	})
+	return refs, err
+}
+func (s *Store) PendingImageRecords(limit int) ([]string, error) {
+	ids := []string{}
+	err := s.db.View(func(tx *bolt.Tx) error {
+		c := tx.Bucket(imageJobs).Cursor()
+		for k, _ := c.First(); k != nil && len(ids) < limit; k, _ = c.Next() {
+			ids = append(ids, string(k))
+		}
+		return nil
+	})
+	return ids, err
+}
+func (s *Store) QueueImages(id string) error {
+	return s.db.Update(func(tx *bolt.Tx) error {
+		if tx.Bucket(records).Get([]byte(id)) == nil {
+			return ErrNotFound
+		}
+		return tx.Bucket(imageJobs).Put([]byte(id), []byte{1})
+	})
+}
+func (s *Store) FinishImages(id string) error {
+	return s.db.Update(func(tx *bolt.Tx) error {
+		return tx.Bucket(imageJobs).Delete([]byte(id))
+	})
+}
+
+func (s *Store) ImageFailed(recordID, id, message string) error {
+	return s.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(imageAssets)
+		raw := b.Get([]byte(recordID))
+		if raw == nil {
+			return ErrNotFound
+		}
+		var assets []ImageAsset
+		if err := json.Unmarshal(raw, &assets); err != nil {
+			return err
+		}
+		for i := range assets {
+			if assets[i].ID == id {
+				assets[i].Status = "failed"
+				assets[i].Error = message
+			}
+		}
+		encoded, err := json.Marshal(assets)
+		if err != nil {
+			return err
+		}
+		return b.Put([]byte(recordID), encoded)
+	})
+}
+
+// Explicit recorder aliases take precedence over the last CPAMC snapshot.
+func resolvedAlias(tx *bolt.Tx, id string) string {
+	if value := tx.Bucket(aliases).Get([]byte(id)); len(value) > 0 {
+		return string(value)
+	}
+	return string(tx.Bucket(panelAliases).Get([]byte(id)))
+}
+func (s *Store) SyncPanelAliases(values map[string]string) error {
+	if len(values) > 10000 {
+		return errors.New("too many aliases")
+	}
+	for id, alias := range values {
+		if !validSHA256(id) || len(alias) > 1024 || strings.TrimSpace(alias) == "" {
+			return errors.New("invalid alias: lowercase SHA-256 key_id and nonempty alias up to 1024 bytes required")
+		}
+	}
+	return s.db.Update(func(tx *bolt.Tx) error {
+		if err := tx.DeleteBucket(panelAliases); err != nil {
+			return err
+		}
+		b, err := tx.CreateBucket(panelAliases)
+		if err != nil {
+			return err
+		}
+		for id, alias := range values {
+			if err := b.Put([]byte(id), []byte(strings.TrimSpace(alias))); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }

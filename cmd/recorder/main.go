@@ -51,7 +51,7 @@ func main() {
 			http.NotFound(w, r)
 			return
 		}
-		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 8192))
+		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 2<<20))
 		if err != nil {
 			http.Error(w, "request too large", 413)
 			return

@@ -6,7 +6,12 @@ const assert = require('node:assert/strict');
  const key=process.env.RECORDER_MANAGEMENT_KEY;if(!key)throw new Error('Set RECORDER_MANAGEMENT_KEY');
  const browser=await chromium.launch({executablePath:process.env.CHROMIUM_PATH||'/usr/bin/chromium',headless:true,args:['--no-sandbox']});
  try{
-  const page=await browser.newPage({viewport:{width:1440,height:1050}});const errors=[];page.on('pageerror',e=>errors.push(e.message));
+  const page=await browser.newPage({viewport:{width:1440,height:1050}});const errors=[],externalRequests=[],imageRequests=[];page.on('pageerror',e=>errors.push(e.message));
+  await page.addInitScript(()=>{window.revokedImageURLs=[];const original=URL.revokeObjectURL.bind(URL);URL.revokeObjectURL=url=>{window.revokedImageURLs.push(url);return original(url);};});
+  page.on('request',request=>{const url=new URL(request.url());if(['http:','https:'].includes(url.protocol)&&url.origin!==new URL(base).origin)externalRequests.push(request.url());if(url.pathname.endsWith('/image'))imageRequests.push(request);});
+  // Even if a response includes an adversarial original URL, rendering must
+  // only use the authenticated archive ID and never visit that URL.
+  await page.route('**/v0/management/plugins/request-recorder/record?*',async route=>{const response=await route.fetch();if(response.ok()){const data=await response.json();for(const m of [...(data.conversation||[]),...(data.upstream_conversation||[])])for(const image of m.images||[])image.url='https://image-tracker.invalid/original.png';await route.fulfill({response,json:data});}else await route.fulfill({response});});
   await page.goto(base+'/v0/resource/plugins/request-recorder/index.html');
   await page.locator('#login-open').click();await page.locator('#management-key').fill(key);await page.locator('#login-form button[type=submit]').click();
   await page.locator('#login').waitFor({state:'hidden'});await page.waitForFunction(()=>document.querySelectorAll('#rows tr').length>=2);
@@ -18,11 +23,12 @@ const assert = require('node:assert/strict');
   for(let i=0;i<count;i++){
    await page.locator('#rows tr').nth(i).click();await page.locator('#detail').waitFor({state:'visible'});
    const images=page.locator('#detail-body img.original-image');
-   if(await images.count()>=3){found=true;await page.waitForFunction(()=>[...document.querySelectorAll('#detail-body img')].every(i=>i.complete&&i.naturalWidth>0));break;}
+   await page.waitForTimeout(1200);
+   if(await images.count()>=3){found=true;for(let n=0;n<await images.count();n++){await images.nth(n).scrollIntoViewIfNeeded();await images.nth(n).evaluate(img=>img.complete&&img.naturalWidth>0||new Promise((resolve,reject)=>{img.addEventListener('load',resolve,{once:true});img.addEventListener('error',reject,{once:true});}));}break;}
    await page.locator('[data-close=detail]').click();
   }
   assert(found,'input/downstream/upstream original images must render');
-  await page.locator('#detail-body img.original-image').first().click();await page.locator('#image-view').waitFor({state:'visible'});assert((await page.locator('#full-image').getAttribute('src')).startsWith('data:image/png;base64,'));await page.locator('[data-close=image-view]').click();
+  await page.locator('#detail-body img.original-image').first().click();await page.locator('#image-view').waitFor({state:'visible'});assert((await page.locator('#full-image').getAttribute('src')).startsWith('blob:'));await page.locator('[data-close=image-view]').click();
   await page.screenshot({path:process.env.RECORDER_SCREENSHOT_DETAIL||'/tmp/recorder-detail.png',fullPage:true});
   await page.locator('[data-tab=request]').click();assert((await page.locator('#detail-body').textContent()).includes('data:image/png;base64,'));
   await page.locator('[data-tab=upstream]').click();assert((await page.locator('#detail-body').textContent()).includes('API RESPONSE 1'));
@@ -30,9 +36,9 @@ const assert = require('node:assert/strict');
   await page.locator('#detail-body button').first().click();await page.locator('#alias-name').fill('浏览器测试 key');await page.locator('#alias-form button[type=submit]').click();await page.locator('#alias-dialog').waitFor({state:'hidden'});await page.waitForFunction(()=>document.querySelector('#detail-metrics')?.textContent.includes('浏览器测试 key'));
   await page.locator('[data-close=detail]').click();await page.setViewportSize({width:390,height:844});
   assert(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth),'mobile page must not overflow horizontally');
-  assert.deepEqual(errors,[]);
+  assert.deepEqual(errors,[]);assert.deepEqual(externalRequests,[],'browser must never contact image origins');assert(imageRequests.length>0);assert(imageRequests.every(r=>r.headers()['authorization']==='Bearer '+key),'image requests must use management auth');assert(await page.evaluate(()=>window.revokedImageURLs.length>0),'image object URLs must be released');
   // Neither credentials nor record content is kept in browser persistent storage.
   assert.equal(await page.evaluate(()=>localStorage.length+sessionStorage.length),0);
-  console.log('PASS: login, filtering, detail tabs, three original image previews, aliases, mobile layout, no JS errors, no persistent browser storage');
+  console.log('PASS: login, filtering, detail tabs, three original image previews, aliases, mobile layout, no JS errors, no persistent browser storage, no external image requests, authenticated image downloads, released Blob URLs');
  }finally{await browser.close();}
 })().catch(e=>{console.error(e);process.exit(1);});

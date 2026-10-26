@@ -2,6 +2,8 @@
 const $ = (id) => document.getElementById(id);
 const API = "/v0/management/plugins/request-recorder";
 let managementKey = "",
+  keyFromPanel = false,
+  authGeneration = 0,
   offset = 0,
   total = 0,
   detail = null,
@@ -64,6 +66,197 @@ async function api(path, options = {}) {
   }
   return r.json();
 }
+// CPAMC stores its remembered login and per-server key names in same-origin
+// localStorage. Read only these known keys; never persist another credential copy.
+function panelStoredValue(name) {
+  let raw = localStorage.getItem(name);
+  if (raw === null) return null;
+  if (raw.length > 4 * 1024 * 1024) throw new Error("CPAMC 本地数据过大");
+  const prefix = /^enc::v([12])::/.exec(raw);
+  if (prefix) {
+    const scope =
+      prefix[1] === "2"
+        ? "v2|" + location.host
+        : location.host + "|" + navigator.userAgent;
+    const secret = new TextEncoder().encode(
+      "cli-proxy-api-webui::secure-storage|" + scope,
+    );
+    const binary = atob(raw.slice(prefix[0].length));
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++)
+      bytes[i] = binary.charCodeAt(i) ^ secret[i % secret.length];
+    raw = new TextDecoder().decode(bytes);
+  }
+  try {
+    return JSON.parse(raw);
+  } catch (error) {
+    if (name === "managementKey" || name === "apiBase" || name === "apiUrl")
+      return raw;
+    throw error;
+  }
+}
+function panelConnection() {
+  try {
+    const state = panelStoredValue("cli-proxy-auth")?.state;
+    const apiBase =
+      state?.apiBase ||
+      panelStoredValue("apiBase") ||
+      panelStoredValue("apiUrl");
+    if (typeof apiBase !== "string") return null;
+    const url = new URL(apiBase);
+    if (url.origin !== location.origin || url.username || url.password)
+      return null;
+    const key = state?.managementKey || panelStoredValue("managementKey");
+    return { apiBase, key: typeof key === "string" ? key.trim() : "" };
+  } catch {
+    return null;
+  }
+}
+async function sha256Hex(text) {
+  if (!crypto.subtle) throw new Error("备注同步需要 HTTPS 安全上下文");
+  const bytes = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(text),
+  );
+  return Array.from(new Uint8Array(bytes), (b) =>
+    b.toString(16).padStart(2, "0"),
+  ).join("");
+}
+let panelMessage = "",
+  panelSyncPromise = null,
+  panelSyncAt = 0,
+  panelSnapshot = "";
+async function syncPanelAliases(force = false) {
+  if (
+    !managementKey ||
+    panelSyncPromise ||
+    (!force && Date.now() - panelSyncAt < 30000)
+  )
+    return panelSyncPromise;
+  panelSyncAt = Date.now();
+  panelSyncPromise = (async () => {
+    const panel = panelConnection();
+    if (!panel) return;
+    const stored = panelStoredValue("api-key-names:v1:" + panel.apiBase);
+    if (
+      stored !== null &&
+      (typeof stored !== "object" || Array.isArray(stored))
+    )
+      throw new Error("CPAMC 备注格式无法识别");
+    const names = Object.fromEntries(
+      Object.entries(stored || {}).filter(
+        ([id, label]) =>
+          /^[a-f0-9]{64}$/.test(id) &&
+          typeof label === "string" &&
+          label.trim(),
+      ),
+    );
+    const snapshot = JSON.stringify([panel.apiBase, names]);
+    if (snapshot === panelSnapshot) return;
+    const credential = managementKey;
+    // Fetch the actual keys only in memory to translate CPAMC's scoped hash to
+    // the recorder's SHA-256 key ID. Only hashes and labels reach /aliases/sync.
+    let response = await fetch("/v8/management/config/access/api-keys", {
+      credentials: "omit",
+      cache: "no-store",
+      headers: { Authorization: "Bearer " + credential },
+    });
+    if (response.status === 404 || response.status === 405)
+      response = await fetch("/v0/management/api-keys", {
+        credentials: "omit",
+        cache: "no-store",
+        headers: { Authorization: "Bearer " + credential },
+      });
+    if (!response.ok)
+      throw new Error("无法读取 CPA key 列表（HTTP " + response.status + "）");
+    const data = await response.json();
+    const keys = Array.isArray(data) ? data : data["api-keys"];
+    if (
+      !Array.isArray(keys) ||
+      keys.length > 10000 ||
+      keys.some((key) => typeof key !== "string")
+    )
+      throw new Error("CPA key 列表格式无法识别或超过同步上限");
+    const aliases = {};
+    let matched = 0;
+    for (const key of keys) {
+      const id = await sha256Hex(
+        JSON.stringify(["api-key-name", panel.apiBase, key]),
+      );
+      if (names[id]) {
+        aliases[await sha256Hex(key)] = names[id].trim();
+        matched++;
+      }
+    }
+    if (
+      credential !== managementKey ||
+      panelConnection()?.apiBase !== panel.apiBase
+    )
+      return;
+    await api("/aliases/sync", {
+      method: "POST",
+      body: JSON.stringify({ aliases }),
+    });
+    panelSnapshot = snapshot;
+    panelMessage = `CPAMC 备注已同步 ${matched} 条（手动别名优先）`;
+    const unmatched = Object.keys(names).length - matched;
+    if (unmatched) panelMessage += ` · ${unmatched} 条未匹配当前 CPA key`;
+  })()
+    .catch((error) => {
+      panelMessage = "CPAMC 备注同步失败：" + error.message;
+    })
+    .finally(() => {
+      panelSyncPromise = null;
+    });
+  return panelSyncPromise;
+}
+async function connectFromPanel() {
+  const panel = panelConnection();
+  if (!panel?.key) {
+    if (keyFromPanel) {
+      managementKey = "";
+      keyFromPanel = false;
+      clearAuthenticatedView();
+      notice("CPAMC 登录凭据已移除。后台仍在记录；查看记录需要重新登录。");
+    }
+    return false;
+  }
+  if (managementKey !== panel.key) clearAuthenticatedView();
+  managementKey = panel.key;
+  keyFromPanel = true;
+  try {
+    await api("/status"); // The host validates the borrowed key before any data access.
+    if (managementKey !== panel.key) return false;
+    await syncPanelAliases(true);
+    await refresh();
+    if ($("login").open) $("login").close();
+    return true;
+  } catch {
+    if (managementKey !== panel.key) return false;
+    managementKey = "";
+    keyFromPanel = false;
+    clearAuthenticatedView();
+    notice("无法复用 CPAMC 登录，请使用管理密钥连接。后台记录不受影响。");
+    return false;
+  }
+}
+function clearAuthenticatedView() {
+  generation++;
+  authGeneration++;
+  clearDetailImages();
+  detail = null;
+  if ($("detail").open) $("detail").close();
+  $("rows").replaceChildren();
+  $("detail-body").replaceChildren();
+  $("detail-metrics").replaceChildren();
+  $("empty").hidden = false;
+  $("connection").textContent = "未连接";
+  $("health").textContent = "等待连接";
+  $("total").textContent = "—";
+  document
+    .querySelectorAll("#stats strong")
+    .forEach((n) => (n.textContent = "—"));
+}
 function filterQuery() {
   const q = new URLSearchParams();
   for (const [k, v] of new FormData($("filters")))
@@ -81,6 +274,7 @@ async function refresh() {
   }
   const seq = ++generation;
   try {
+    await syncPanelAliases();
     const [page, status] = await Promise.all([
       api("/records?" + filterQuery()),
       api("/status"),
@@ -105,6 +299,7 @@ async function refresh() {
         `采集中 ${status.active} · 补全中 ${status.pending_logs} · 丢弃 ${status.dropped_requests}`,
       ),
     );
+    if (panelMessage) $("health").append(el("div", "", panelMessage));
     const warnings = [];
     if (status.last_error) warnings.push("采集错误：" + status.last_error);
     if (status.dropped_requests)
@@ -212,8 +407,11 @@ function renderRows(items) {
   }
 }
 async function openDetail(id) {
+  const authRevision = authGeneration;
   try {
     const data = await api("/record?id=" + encodeURIComponent(id));
+    if (authRevision !== authGeneration || !managementKey) return;
+    if (!detail || detail.record.id !== data.record.id) clearDetailImages();
     detail = data;
     activeTab = "conversation";
     $("detail-title").textContent =
@@ -257,72 +455,250 @@ function section(title, body) {
   box.append(el("h3", "", title), raw(body));
   return box;
 }
+// Images are fetched only from the authenticated CPA API. The original remote
+// URL is never assigned to img.src, linked, or fetched by this page.
+let imageSession = 0,
+  imageController = new AbortController(),
+  imagePollTimer = 0;
+let imageQueue = [],
+  imageActive = 0,
+  imageObserver = null;
+const imagePromises = new Map(),
+  imageObjectURLs = new Set();
+function clearDetailImages() {
+  imageSession++;
+  imageController.abort();
+  imageController = new AbortController();
+  for (const job of imageQueue)
+    job.reject(new DOMException("Canceled", "AbortError"));
+  imageQueue = [];
+  imagePromises.clear();
+  for (const url of imageObjectURLs) URL.revokeObjectURL(url);
+  imageObjectURLs.clear();
+  imageObserver?.disconnect();
+  imageObserver = null;
+  clearTimeout(imagePollTimer);
+  imagePollTimer = 0;
+  $("full-image").removeAttribute("src");
+  $("image-download").removeAttribute("href");
+  if ($("image-view").open) $("image-view").close();
+}
+function pumpImages() {
+  while (imageActive < 2 && imageQueue.length) {
+    const job = imageQueue.shift();
+    imageActive++;
+    job
+      .run()
+      .then(job.resolve, job.reject)
+      .finally(() => {
+        imageActive--;
+        pumpImages();
+      });
+  }
+}
+function archivedImage(image, recordID) {
+  const key = recordID + ":" + image.id;
+  if (imagePromises.has(key)) return imagePromises.get(key);
+  const session = imageSession,
+    signal = imageController.signal;
+  const promise = new Promise((resolve, reject) => {
+    imageQueue.push({
+      resolve,
+      reject,
+      run: async () => {
+        if (session !== imageSession)
+          throw new DOMException("Canceled", "AbortError");
+        const path =
+          API +
+          "/image?record_id=" +
+          encodeURIComponent(recordID) +
+          "&id=" +
+          encodeURIComponent(image.id);
+        const response = await fetch(path, {
+          signal,
+          credentials: "omit",
+          cache: "no-store",
+          headers: { Authorization: "Bearer " + managementKey },
+        });
+        if (!response.ok)
+          throw new Error("CPA 图片读取失败（HTTP " + response.status + "）");
+        const blob = await response.blob();
+        if (!/^image\/(png|jpeg|gif|webp|bmp|avif)$/.test(blob.type))
+          throw new Error("CPA 返回的图片类型不支持");
+        if (session !== imageSession || signal.aborted)
+          throw new DOMException("Canceled", "AbortError");
+        const url = URL.createObjectURL(blob);
+        imageObjectURLs.add(url);
+        return { url, mime: blob.type };
+      },
+    });
+    pumpImages();
+  });
+  imagePromises.set(key, promise);
+  promise.catch(() => imagePromises.delete(key));
+  return promise;
+}
+function scheduleImagePoll() {
+  if (imagePollTimer || !detail) return;
+  const recordID = detail.record.id,
+    session = imageSession;
+  imagePollTimer = setTimeout(async () => {
+    imagePollTimer = 0;
+    if (
+      session !== imageSession ||
+      !detail ||
+      detail.record.id !== recordID ||
+      !$("detail").open
+    )
+      return;
+    try {
+      const state = await api(
+        "/images?record_id=" + encodeURIComponent(recordID),
+      );
+      if (session !== imageSession || detail?.record.id !== recordID) return;
+      const byID = new Map(state.images.map((im) => [im.id, im]));
+      let changed = false,
+        pending = false;
+      detail.record.images = state.images;
+      for (const m of [
+        ...(detail.conversation || []),
+        ...(detail.upstream_conversation || []),
+      ]) {
+        for (const im of m.images || []) {
+          const asset = byID.get(im.id);
+          let status =
+            asset?.status ||
+            (state.images.length >= state.limit ? "blocked" : "pending");
+          const error =
+            asset?.error ||
+            (status === "blocked" ? "超过单条记录图片数量限制" : "");
+          if (im.status !== status || im.error !== error) {
+            im.status = status;
+            im.error = error;
+            im.mime = asset?.mime;
+            changed = true;
+          }
+          if (status === "pending") pending = true;
+        }
+      }
+      if (changed) renderDetail();
+      if (pending || state.pending) scheduleImagePoll();
+    } catch (error) {
+      notice("无法查询 CPA 图片归档状态：" + error.message);
+    }
+  }, 1000);
+}
 function imageView(image) {
   const box = el("div", "image-card");
-  const url = image.url || "";
-  const title = el("div", "image-caption", image.alt || "原始图片");
-  box.append(title);
-  function show() {
-    const img = el("img", "original-image");
-    img.alt = image.alt || "原始图片";
-    img.loading = "lazy";
-    img.referrerPolicy = "no-referrer";
-    img.onerror = () => {
-      box.append(
-        el(
-          "p",
-          "error",
-          "图片加载失败，URL 可能已过期、需要鉴权或网络不可用；原始字段仍可在原文中查看。",
-        ),
-      );
-    };
-    img.src = url;
-    const a = el("button", "link", "查看原图 ↗");
-    a.type = "button";
-    const open = () => {
-      $("full-image").src = url;
-      $("image-download").hidden = !url.startsWith("data:");
-      $("image-download").href = url;
-      $("image-view").showModal();
-    };
-    a.onclick = open;
-    img.onclick = open;
-    box.append(img, a);
-  }
-  if (
-    /^data:image\/(png|jpeg|gif|webp|avif|bmp);base64,[a-z0-9+/=\s]+$/i.test(
-      url,
-    )
-  )
-    show();
-  else {
-    let parsed;
-    try {
-      parsed = new URL(url);
-    } catch {}
-    if (
-      parsed &&
-      ["https:", "http:"].includes(parsed.protocol) &&
-      !parsed.username &&
-      !parsed.password
-    ) {
-      const button = el("button", "", "加载远程原图");
-      button.type = "button";
-      box.append(
-        el("p", "muted", parsed.origin + " · 按需从原地址加载，可能已过期"),
-      );
-      button.onclick = () => {
-        button.remove();
-        show();
+  box.dataset.imageId = image.id || "";
+  box.append(
+    el("div", "image-caption", image.alt || "原始图片 · CPA 本地归档"),
+  );
+  if (image.status !== "ready") {
+    box.append(
+      el(
+        "p",
+        image.status === "pending" ? "muted" : "error",
+        image.status === "pending"
+          ? "CPA 正在下载并保存原图…"
+          : image.error || "图片未能保存到 CPA",
+      ),
+    );
+    if (image.status === "pending") scheduleImagePoll();
+    else {
+      const retry = el("button", "", "重试服务端保存");
+      retry.type = "button";
+      retry.onclick = async () => {
+        try {
+          await api(
+            "/images/retry?record_id=" + encodeURIComponent(detail.record.id),
+            { method: "POST" },
+          );
+          image.status = "pending";
+          image.error = "";
+          renderDetail();
+          scheduleImagePoll();
+        } catch (error) {
+          notice(error.message);
+        }
       };
-      box.append(button);
-    } else
-      box.append(
-        el("p", "muted", "图片地址格式不支持直接预览，请查看原始数据。"),
-      );
+      box.append(retry);
+    }
+    return box;
   }
+  const img = el("img", "original-image");
+  img.alt = image.alt || "CPA 保存的原始图片";
+  img.loading = "lazy";
+  const status = el("p", "muted", "从 CPA 加载原图…");
+  box.append(img, status);
+  const recordID = detail.record.id;
+  const load = async () => {
+    try {
+      const saved = await archivedImage(image, recordID);
+      if (!box.isConnected) return;
+      img.src = saved.url;
+      status.remove();
+      img.onerror = () =>
+        box.append(
+          el("p", "error", "本地图片无法解码；原始数据仍保留在 CPA。"),
+        );
+      const open = () => {
+        $("full-image").src = saved.url;
+        $("image-download").hidden = false;
+        $("image-download").href = saved.url;
+        $("image-download").download =
+          image.id +
+          "." +
+          (saved.mime.split("/")[1] === "jpeg"
+            ? "jpg"
+            : saved.mime.split("/")[1]);
+        $("image-view").showModal();
+      };
+      img.onclick = open;
+      const zoom = el("button", "link", "查看已归档原图 ↗");
+      zoom.type = "button";
+      zoom.onclick = open;
+      box.append(zoom);
+    } catch (error) {
+      if (error.name !== "AbortError" && box.isConnected) {
+        status.className = "error";
+        status.textContent = error.message;
+        const retry = el("button", "", "重试服务端保存");
+        retry.onclick = async () => {
+          try {
+            await api(
+              "/images/retry?record_id=" + encodeURIComponent(recordID),
+              { method: "POST" },
+            );
+            image.status = "pending";
+            renderDetail();
+            scheduleImagePoll();
+          } catch (err) {
+            notice(err.message);
+          }
+        };
+        box.append(retry);
+      }
+    }
+  };
+  if ("IntersectionObserver" in window) {
+    if (!imageObserver)
+      imageObserver = new IntersectionObserver(
+        (entries) => {
+          for (const entry of entries)
+            if (entry.isIntersecting) {
+              imageObserver.unobserve(entry.target);
+              entry.target.loadArchivedImage?.();
+            }
+        },
+        { root: $("detail-body"), rootMargin: "250px" },
+      );
+    box.loadArchivedImage = load;
+    imageObserver.observe(box);
+  } else queueMicrotask(load);
   return box;
 }
+
 function bubble(m) {
   const box = el("article", "bubble " + m.role + " " + m.kind);
   const label = el("div", "bubble-label");
@@ -379,6 +755,7 @@ function renderDetail() {
   if (!detail) return;
   const r = detail.record,
     body = $("detail-body");
+  imageObserver?.disconnect();
   body.replaceChildren();
   document.querySelectorAll("[data-tab]").forEach((b) => {
     const yes = b.dataset.tab === activeTab;
@@ -392,7 +769,7 @@ function renderDetail() {
       el(
         "div",
         "view-note",
-        "根据这次请求携带的历史上下文还原；不会补造未提供的历史、工具结果或隐藏思考。图片按原始多模态字段展示。",
+        "根据这次请求携带的历史上下文还原。原图由 CPA 保存并通过管理鉴权接口提供，浏览器不会访问图片源站。",
       ),
     );
     if (!detail.conversation?.length)
@@ -522,6 +899,8 @@ $("alias-open").onclick = () => {
 };
 $("login-form").onsubmit = async (e) => {
   e.preventDefault();
+  clearAuthenticatedView();
+  keyFromPanel = false;
   managementKey = $("management-key").value.trim();
   $("management-key").value = "";
   $("login-error").textContent = "";
@@ -593,3 +972,26 @@ setInterval(() => {
   if ($("auto").checked && managementKey && !document.hidden)
     refresh().catch(() => {});
 }, 5000);
+
+// Storage events are emitted in this iframe when CPAMC edits its saved notes.
+let panelStorageTimer;
+window.addEventListener("storage", (event) => {
+  if (
+    event.key === "cli-proxy-auth" ||
+    event.key?.startsWith("api-key-names:v1:")
+  ) {
+    clearTimeout(panelStorageTimer);
+    panelStorageTimer = setTimeout(async () => {
+      if (event.key === "cli-proxy-auth") {
+        panelSnapshot = "";
+        if (keyFromPanel || !managementKey) await connectFromPanel();
+      } else if (managementKey) {
+        await syncPanelAliases(true);
+        await refresh().catch(() => {});
+      }
+    }, 200);
+  }
+});
+connectFromPanel();
+$("detail").addEventListener("close", clearDetailImages);
+window.addEventListener("pagehide", clearDetailImages);

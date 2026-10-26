@@ -19,8 +19,12 @@ type Message struct {
 	Images     []Image `json:"images,omitempty"`
 }
 type Image struct {
-	URL string `json:"url"`
-	Alt string `json:"alt"`
+	ID     string `json:"id,omitempty"`
+	Status string `json:"status,omitempty"`
+	Error  string `json:"error,omitempty"`
+	MIME   string `json:"mime,omitempty"`
+	URL    string `json:"url,omitempty"`
+	Alt    string `json:"alt"`
 }
 
 func imageMessage(role string, b map[string]any) Message {
