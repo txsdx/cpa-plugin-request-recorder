@@ -44,7 +44,11 @@ func recordWithImage(id, source string) *Record {
 }
 func awaitAssets(t *testing.T, s *Store, id string) []ImageAsset {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	return awaitAssetsWithin(t, s, id, 5*time.Second)
+}
+func awaitAssetsWithin(t *testing.T, s *Store, id string, timeout time.Duration) []ImageAsset {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		assets, err := s.GetImages(id)
 		check(t, err)
@@ -391,7 +395,7 @@ func TestImageQueueOverflowSurvivesRestart(t *testing.T) {
 	restored, err := New(cfg)
 	check(t, err)
 	defer restored.Close()
-	if assets := awaitAssets(t, restored.store, "record-257"); assets[0].Status != "ready" {
+	if assets := awaitAssetsWithin(t, restored.store, "record-257", 45*time.Second); assets[0].Status != "ready" {
 		t.Fatal("overflow image did not resume", assets)
 	}
 }

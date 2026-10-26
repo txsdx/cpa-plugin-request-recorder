@@ -432,6 +432,19 @@ func (s *Store) PendingImageRecords(limit int) ([]string, error) {
 	return ids, err
 }
 func (s *Store) QueueImages(id string) error {
+	queued := false
+	if err := s.view(func(tx *bolt.Tx) error {
+		if tx.Bucket(records).Get([]byte(id)) == nil {
+			return ErrNotFound
+		}
+		queued = tx.Bucket(imageJobs).Get([]byte(id)) != nil
+		return nil
+	}); err != nil {
+		return err
+	}
+	if queued {
+		return nil
+	}
 	return s.update(0, func(tx *bolt.Tx) error {
 		if tx.Bucket(records).Get([]byte(id)) == nil {
 			return ErrNotFound
