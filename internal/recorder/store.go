@@ -2,6 +2,7 @@ package recorder
 
 import (
 	"bytes"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -9,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	bolt "go.etcd.io/bbolt"
@@ -24,19 +26,44 @@ var traces = []byte("traces")
 var imageAssets = []byte("images")
 var imageJobs = []byte("image_jobs")
 
-type Store struct{ db *bolt.DB }
+var storageMeta = []byte("storage_meta")
+
+type mutationJournal struct {
+	operations []func(*bolt.Tx) error
+	bytes      int
+	overflow   bool
+}
+type Store struct {
+	mu                   sync.RWMutex
+	writes               sync.Mutex
+	maintenance          sync.Mutex
+	wg                   sync.WaitGroup
+	closing              bool
+	running              bool
+	journal              *mutationJournal
+	db                   *bolt.DB
+	limit                int64
+	lastMaintenanceError string
+}
 
 func Open(path string) (*Store, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return nil, err
 	}
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		path = resolved
+	}
 	db, err := bolt.Open(path, 0600, &bolt.Options{Timeout: time.Second})
 	if err != nil {
 		return nil, err
 	}
-	s := &Store{db}
+	db.AllocSize = 64 << 10
+	s := &Store{db: db, limit: 1 << 30}
 	err = db.Update(func(tx *bolt.Tx) error {
-		for _, name := range [][]byte{records, summaries, ordering, aliases, panelAliases, traces, imageAssets, imageJobs} {
+		if tx.Bucket(storageMeta) == nil && tx.Bucket(records) != nil && tx.Bucket(records).Stats().KeyN > 0 {
+			return errors.New("旧数据库格式不再支持，请停止 CPA 并移走旧数据库后重启")
+		}
+		for _, name := range [][]byte{records, summaries, ordering, aliases, panelAliases, traces, imageAssets, imageJobs, bodyChunks, bodyCounts, storageMeta} {
 			if _, e := tx.CreateBucketIfNotExists(name); e != nil {
 				return e
 			}
@@ -49,11 +76,90 @@ func Open(path string) (*Store, error) {
 	}
 	return s, nil
 }
-func (s *Store) Close() error   { return s.db.Close() }
+func (s *Store) Close() error {
+	s.maintenance.Lock()
+	s.closing = true
+	s.maintenance.Unlock()
+	s.wg.Wait()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.db.Close()
+}
 func orderKey(r Summary) []byte { return []byte(fmt.Sprintf("%020d:%s", r.StartedAt.UnixNano(), r.ID)) }
 func (s *Store) Save(r *Record) error {
-	return s.db.Update(func(tx *bolt.Tx) error {
+	stored, chunks := prepareStoredRecord(r)
+	raw, err := json.Marshal(&stored)
+	if err != nil {
+		return err
+	}
+	sum, err := json.Marshal(stored.Summary)
+	if err != nil {
+		return err
+	}
+	// Compress only new chunks and do expensive work outside the write lock.
+	encoded := map[string][]byte{}
+	err = s.view(func(tx *bolt.Tx) error {
+		for id, body := range chunks {
+			if tx.Bucket(bodyChunks).Get([]byte(id)) == nil {
+				data, err := encodeBodyChunk(body)
+				if err != nil {
+					return err
+				}
+				encoded[id] = data
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	cost := len(raw)
+	for _, body := range recordBodyFields(r) {
+		cost += len(*body)
+	}
+	r = &stored.Record // immutable metadata captured for compaction replay
+	return s.update(cost, func(tx *bolt.Tx) error {
 		id := []byte(r.ID)
+		oldIDs, err := storedChunkIDs(tx.Bucket(records).Get(id))
+		if err != nil {
+			return err
+		}
+		for chunkID, body := range chunks {
+			key := []byte(chunkID)
+			if tx.Bucket(bodyChunks).Get(key) == nil {
+				data := encoded[chunkID]
+				if data == nil {
+					data, err = encodeBodyChunk(body) // pruned between read/write transactions
+					if err != nil {
+						return err
+					}
+				}
+				if err := tx.Bucket(bodyChunks).Put(key, data); err != nil {
+					return err
+				}
+			}
+			if !oldIDs[chunkID] {
+				var count uint64
+				if value := tx.Bucket(bodyCounts).Get(key); value != nil {
+					if len(value) != 8 {
+						return errors.New("invalid body reference count")
+					}
+					count = binary.BigEndian.Uint64(value)
+				}
+				var value [8]byte
+				binary.BigEndian.PutUint64(value[:], count+1)
+				if err := tx.Bucket(bodyCounts).Put(key, value[:]); err != nil {
+					return err
+				}
+			}
+		}
+		for chunkID := range oldIDs {
+			if _, exists := chunks[chunkID]; !exists {
+				if err := releaseBodyChunk(tx, chunkID); err != nil {
+					return err
+				}
+			}
+		}
 		if r.TraceID != "" {
 			if err := tx.Bucket(traces).Put([]byte(r.TraceID+"\x00"+r.ID), id); err != nil {
 				return err
@@ -73,41 +179,29 @@ func (s *Store) Save(r *Record) error {
 				}
 			}
 		}
-		// Persist image work in the same transaction as the body. A full memory
-		// queue or a crash before scheduling must not lose archival work.
 		if err := tx.Bucket(imageJobs).Put(id, []byte{1}); err != nil {
 			return err
 		}
-		// Aliases are joined at read time, so edits apply to historical records too.
-		r.KeyAlias = ""
-		stored := *r
-		stored.Images = nil
-		raw, err := json.Marshal(&stored)
-		if err != nil {
+		if err := tx.Bucket(records).Put(id, raw); err != nil {
 			return err
 		}
-		sum, err := json.Marshal(r.Summary)
-		if err != nil {
-			return err
-		}
-		if err = tx.Bucket(records).Put(id, raw); err != nil {
-			return err
-		}
-		if err = tx.Bucket(summaries).Put(id, sum); err != nil {
+		if err := tx.Bucket(summaries).Put(id, sum); err != nil {
 			return err
 		}
 		return tx.Bucket(ordering).Put(orderKey(r.Summary), id)
 	})
 }
 func (s *Store) Get(id string) (*Record, error) {
-	var r Record
-	err := s.db.View(func(tx *bolt.Tx) error {
+	var r *Record
+	err := s.view(func(tx *bolt.Tx) error {
 		b := tx.Bucket(records).Get([]byte(id))
 		if b == nil {
 			return ErrNotFound
 		}
-		if e := json.Unmarshal(b, &r); e != nil {
-			return e
+		var err error
+		r, err = decodeStoredRecord(tx, b)
+		if err != nil {
+			return err
 		}
 		if raw := tx.Bucket(imageAssets).Get([]byte(id)); raw != nil {
 			if err := json.Unmarshal(raw, &r.Images); err != nil {
@@ -117,7 +211,7 @@ func (s *Store) Get(id string) (*Record, error) {
 		r.KeyAlias = resolvedAlias(tx, r.KeyID)
 		return nil
 	})
-	return &r, err
+	return r, err
 }
 
 type Filter struct {
@@ -141,7 +235,7 @@ func (s *Store) List(f Filter) (Page, error) {
 		f.Offset = 0
 	}
 	p := Page{Items: []Summary{}, Offset: f.Offset, Limit: f.Limit}
-	err := s.db.View(func(tx *bolt.Tx) error {
+	err := s.view(func(tx *bolt.Tx) error {
 		c := tx.Bucket(ordering).Cursor()
 		for k, v := c.Last(); k != nil; k, v = c.Prev() {
 			var r Summary
@@ -165,7 +259,7 @@ func (s *Store) List(f Filter) (Page, error) {
 					break
 				}
 			}
-			if !match || !contains(strings.Join([]string{r.ID, r.TraceID, r.KeyAlias, r.KeyHint, r.KeyID, r.CallerScope, r.ClientIP, r.Model, r.RequestedModel, r.ResponseModel, r.Provider, r.SessionID, r.UserAgent}, " "), f.Query) {
+			if !match || !contains(strings.Join([]string{r.ID, r.TraceID, r.KeyAlias, r.KeyHint, r.KeyID, r.CallerScope, r.ClientIP, r.Model, r.RequestedModel, r.ResponseModel, r.Provider, r.SessionID, r.UserAgent, r.LatestPrompt, r.LatestResponse}, " "), f.Query) {
 				continue
 			}
 			if p.Total >= f.Offset && len(p.Items) < f.Limit {
@@ -186,7 +280,7 @@ func (s *Store) SetAlias(id, alias string) error {
 	if len(alias) > 120 {
 		return errors.New("alias too long")
 	}
-	return s.db.Update(func(tx *bolt.Tx) error {
+	return s.update(0, func(tx *bolt.Tx) error {
 		if alias == "" {
 			return tx.Bucket(aliases).Delete([]byte(id))
 		}
@@ -194,10 +288,10 @@ func (s *Store) SetAlias(id, alias string) error {
 	})
 }
 func (s *Store) Prune(days, max int) error {
-	return s.db.Update(func(tx *bolt.Tx) error {
+	cutoff := time.Now().AddDate(0, 0, -days)
+	return s.update(0, func(tx *bolt.Tx) error {
 		b := tx.Bucket(ordering)
 		count := b.Stats().KeyN
-		cutoff := time.Now().AddDate(0, 0, -days)
 		c := b.Cursor()
 		for k, v := c.First(); k != nil; k, v = c.Next() {
 			var r Summary
@@ -208,6 +302,15 @@ func (s *Store) Prune(days, max int) error {
 				break
 			}
 			id := append([]byte(nil), v...)
+			chunkIDs, err := storedChunkIDs(tx.Bucket(records).Get(id))
+			if err != nil {
+				return err
+			}
+			for chunkID := range chunkIDs {
+				if err := releaseBodyChunk(tx, chunkID); err != nil {
+					return err
+				}
+			}
 			if err := tx.Bucket(imageJobs).Delete(id); err != nil {
 				return err
 			}
@@ -238,7 +341,7 @@ func (s *Store) ByTrace(trace string) ([]Summary, error) {
 	if trace == "" {
 		return out, nil
 	}
-	err := s.db.View(func(tx *bolt.Tx) error {
+	err := s.view(func(tx *bolt.Tx) error {
 		prefix := []byte(trace + "\x00")
 		c := tx.Bucket(traces).Cursor()
 		for k, v := c.Seek(prefix); k != nil && bytes.HasPrefix(k, prefix); k, v = c.Next() {
@@ -257,7 +360,7 @@ func (s *Store) ByTrace(trace string) ([]Summary, error) {
 
 func (s *Store) PendingLogs() ([]Summary, error) {
 	out := []Summary{}
-	err := s.db.View(func(tx *bolt.Tx) error {
+	err := s.view(func(tx *bolt.Tx) error {
 		return tx.Bucket(summaries).ForEach(func(_, v []byte) error {
 			var r Summary
 			if err := json.Unmarshal(v, &r); err != nil {
@@ -276,7 +379,7 @@ func (s *Store) PendingLogs() ([]Summary, error) {
 // cannot overwrite concurrent usage/log enrichment or rewrite multi-MiB bodies.
 func (s *Store) GetImages(id string) ([]ImageAsset, error) {
 	out := []ImageAsset{}
-	err := s.db.View(func(tx *bolt.Tx) error {
+	err := s.view(func(tx *bolt.Tx) error {
 		if tx.Bucket(records).Get([]byte(id)) == nil {
 			return ErrNotFound
 		}
@@ -292,7 +395,7 @@ func (s *Store) SetImages(id string, assets []ImageAsset) error {
 	if err != nil {
 		return err
 	}
-	return s.db.Update(func(tx *bolt.Tx) error {
+	return s.update(len(raw), func(tx *bolt.Tx) error {
 		if tx.Bucket(records).Get([]byte(id)) == nil {
 			return ErrNotFound
 		}
@@ -301,7 +404,7 @@ func (s *Store) SetImages(id string, assets []ImageAsset) error {
 }
 func (s *Store) ImageReferences() (map[string]bool, error) {
 	refs := map[string]bool{}
-	err := s.db.View(func(tx *bolt.Tx) error {
+	err := s.view(func(tx *bolt.Tx) error {
 		return tx.Bucket(imageAssets).ForEach(func(_, raw []byte) error {
 			var images []ImageAsset
 			if err := json.Unmarshal(raw, &images); err != nil {
@@ -319,7 +422,7 @@ func (s *Store) ImageReferences() (map[string]bool, error) {
 }
 func (s *Store) PendingImageRecords(limit int) ([]string, error) {
 	ids := []string{}
-	err := s.db.View(func(tx *bolt.Tx) error {
+	err := s.view(func(tx *bolt.Tx) error {
 		c := tx.Bucket(imageJobs).Cursor()
 		for k, _ := c.First(); k != nil && len(ids) < limit; k, _ = c.Next() {
 			ids = append(ids, string(k))
@@ -329,7 +432,7 @@ func (s *Store) PendingImageRecords(limit int) ([]string, error) {
 	return ids, err
 }
 func (s *Store) QueueImages(id string) error {
-	return s.db.Update(func(tx *bolt.Tx) error {
+	return s.update(0, func(tx *bolt.Tx) error {
 		if tx.Bucket(records).Get([]byte(id)) == nil {
 			return ErrNotFound
 		}
@@ -337,13 +440,13 @@ func (s *Store) QueueImages(id string) error {
 	})
 }
 func (s *Store) FinishImages(id string) error {
-	return s.db.Update(func(tx *bolt.Tx) error {
+	return s.update(0, func(tx *bolt.Tx) error {
 		return tx.Bucket(imageJobs).Delete([]byte(id))
 	})
 }
 
 func (s *Store) ImageFailed(recordID, id, message string) error {
-	return s.db.Update(func(tx *bolt.Tx) error {
+	return s.update(0, func(tx *bolt.Tx) error {
 		b := tx.Bucket(imageAssets)
 		raw := b.Get([]byte(recordID))
 		if raw == nil {
@@ -374,7 +477,11 @@ func resolvedAlias(tx *bolt.Tx, id string) string {
 	}
 	return string(tx.Bucket(panelAliases).Get([]byte(id)))
 }
-func (s *Store) SyncPanelAliases(values map[string]string) error {
+func (s *Store) SyncPanelAliases(input map[string]string) error {
+	values := make(map[string]string, len(input))
+	for k, v := range input {
+		values[k] = v
+	}
 	if len(values) > 10000 {
 		return errors.New("too many aliases")
 	}
@@ -383,7 +490,11 @@ func (s *Store) SyncPanelAliases(values map[string]string) error {
 			return errors.New("invalid alias: lowercase SHA-256 key_id and nonempty alias up to 1024 bytes required")
 		}
 	}
-	return s.db.Update(func(tx *bolt.Tx) error {
+	cost := 4096
+	for k, v := range values {
+		cost += len(k) + len(v)
+	}
+	return s.update(cost, func(tx *bolt.Tx) error {
 		if err := tx.DeleteBucket(panelAliases); err != nil {
 			return err
 		}

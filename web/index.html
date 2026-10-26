@@ -16,7 +16,7 @@
       <div class="actions">
         <span id="connection" class="muted">未连接</span
         ><button id="login-open">连接管理 API</button
-        ><button id="refresh" class="primary">↻ 刷新</button>
+        ><button id="storage-open">存储占用</button>
       </div>
     </header>
     <main>
@@ -42,7 +42,18 @@
           </div>
           <div class="actions">
             <label class="auto"
-              ><input type="checkbox" id="auto" />自动刷新</label
+              ><input type="checkbox" id="auto" checked />自动刷新</label
+            ><label class="refresh-period"
+              ><input
+                id="refresh-interval"
+                type="number"
+                min="1"
+                max="3600"
+                value="1"
+                aria-label="自动刷新间隔秒数"
+              />
+              秒</label
+            ><button id="refresh" class="primary">↻ 刷新</button
             ><button id="alias-open">管理 key 别名</button>
           </div>
         </div>
@@ -102,6 +113,17 @@
         <div id="notice" class="notice" role="status" hidden></div>
         <div class="table-wrap">
           <table>
+            <colgroup>
+              <col class="col-time" />
+              <col class="col-caller" />
+              <col class="col-model" />
+              <col class="col-state" />
+              <col class="col-timing" />
+              <col class="col-tokens" />
+              <col class="col-upstream" />
+              <col />
+              <col />
+            </colgroup>
             <thead>
               <tr>
                 <th>时间 / 请求</th>
@@ -110,7 +132,9 @@
                 <th>状态</th>
                 <th>首 token / 总耗时</th>
                 <th>Token / 缓存命中</th>
-                <th>上游原文</th>
+                <th>上游记录</th>
+                <th>最新用户提示词</th>
+                <th>上游最新响应</th>
               </tr>
             </thead>
             <tbody id="rows"></tbody>
@@ -204,8 +228,8 @@
         <button data-tab="conversation" class="selected" role="tab">
           对话回放</button
         ><button data-tab="request" role="tab">原请求</button
-        ><button data-tab="upstream" role="tab">上游原文</button
-        ><button data-tab="response" role="tab">下游响应</button
+        ><button data-tab="upstream" role="tab">上游最终结果</button
+        ><button data-tab="response" role="tab">下游最终结果</button
         ><button data-tab="metadata" role="tab">元数据</button>
       </div>
       <div id="detail-body" class="detail-body"></div>
@@ -220,6 +244,13 @@
         download="original-image"
         >下载内嵌原图</a
       >
+    </dialog>
+    <dialog id="storage-view">
+      <div class="dialog-title">
+        <h2>存储占用</h2>
+        <button data-close="storage-view" aria-label="关闭存储占用">✕</button>
+      </div>
+      <div id="storage-body"></div>
     </dialog>
     <script src="app.js" defer></script>
   </body>

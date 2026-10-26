@@ -17,12 +17,14 @@ const APIBase = "/v0/management/plugins/" + PluginID
 const ResourceBase = "/v0/resource/plugins/" + PluginID
 
 // Version is injected from the validated release tag by the build.
-var Version = "0.2.0"
+var Version = "0.3.0"
 
 func Registration() map[string]any {
 	return map[string]any{"schema_version": 6, "metadata": map[string]any{
 		"Name": PluginID, "Version": Version, "Author": "txsdx", "GitHubRepository": "https://github.com/txsdx/cpa-plugin-request-recorder",
 		"ConfigFields": []map[string]string{
+			{"Name": "max_database_bytes", "Type": "integer", "Description": "数据库容量上限，默认 1 GiB；自动淘汰最旧记录并整理，图片和 CPA 源日志另计"},
+			{"Name": "refresh_interval_seconds", "Type": "integer", "Description": "列表自动刷新间隔秒数，默认 1 秒，范围 1..3600"},
 			{"Name": "db_path", "Type": "string", "Description": "持久化数据库路径，变更需重启"},
 			{"Name": "images_dir", "Type": "string", "Description": "图片归档目录，默认数据库旁的 <数据库名>-images"},
 			{"Name": "archive_remote_images", "Type": "boolean", "Description": "由服务器下载并保存公网 HTTPS 图片"},
@@ -43,7 +45,7 @@ func Registration() map[string]any {
 }
 func ManagementRegistration() map[string]any {
 	routes := []map[string]string{}
-	for _, p := range [][2]string{{"GET", "/records"}, {"GET", "/record"}, {"GET", "/status"}, {"GET", "/image"}, {"GET", "/images"}, {"POST", "/aliases"}, {"POST", "/aliases/sync"}, {"POST", "/images/retry"}} {
+	for _, p := range [][2]string{{"GET", "/records"}, {"GET", "/record"}, {"GET", "/status"}, {"GET", "/storage"}, {"GET", "/image"}, {"GET", "/images"}, {"POST", "/settings"}, {"POST", "/aliases"}, {"POST", "/aliases/sync"}, {"POST", "/images/retry"}} {
 		routes = append(routes, map[string]string{"Method": p[0], "Path": APIBase + p[1]})
 	}
 	return map[string]any{"Routes": routes, "Resources": []map[string]string{
@@ -84,6 +86,12 @@ func (e *Engine) Management(req wire.ManagementRequest, web fs.FS) wire.Manageme
 	path := strings.TrimPrefix(req.Path, APIBase)
 	if req.Method == "GET" {
 		switch path {
+		case "/storage":
+			stats, err := e.store.StorageStats()
+			if err != nil {
+				return result(500, map[string]string{"error": "storage diagnostics failed"})
+			}
+			return result(200, stats)
 		case "/status":
 			return result(200, e.Status())
 		case "/records":
@@ -156,6 +164,18 @@ func (e *Engine) Management(req wire.ManagementRequest, web fs.FS) wire.Manageme
 		case "/image":
 			return e.imageResponse(req)
 		}
+	}
+	if req.Method == "POST" && path == "/settings" {
+		var body struct {
+			Interval int `json:"refresh_interval_seconds"`
+		}
+		if len(req.Body) > 1024 || json.Unmarshal(req.Body, &body) != nil || body.Interval < 1 || body.Interval > 3600 {
+			return result(400, map[string]string{"error": "refresh_interval_seconds must be 1..3600"})
+		}
+		if err := e.store.SetRefreshInterval(body.Interval); err != nil {
+			return result(500, map[string]string{"error": "settings write failed"})
+		}
+		return result(200, map[string]int{"refresh_interval_seconds": body.Interval})
 	}
 	if req.Method == "POST" && path == "/images/retry" {
 		id := req.Query.Get("record_id")

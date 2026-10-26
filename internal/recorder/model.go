@@ -11,6 +11,8 @@ import (
 )
 
 type Summary struct {
+	LatestPrompt    string       `json:"latest_prompt"`
+	LatestResponse  string       `json:"latest_response"`
 	ID              string       `json:"id"`
 	TraceID         string       `json:"trace_id"`
 	StartedAt       time.Time    `json:"started_at"`
@@ -44,6 +46,7 @@ type Summary struct {
 }
 type Record struct {
 	Summary
+	UpstreamAttempt   int            `json:"upstream_attempt"`
 	Images            []ImageAsset   `json:"images,omitempty"`
 	UsageAttempts     []UsageAttempt `json:"usage_attempts,omitempty"`
 	RequestBody       string         `json:"request_body"`

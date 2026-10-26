@@ -8,7 +8,11 @@ let managementKey = "",
   total = 0,
   detail = null,
   activeTab = "conversation",
-  generation = 0;
+  generation = 0,
+  refreshRequests = 0,
+  refreshTimer = 0,
+  refreshSeconds = 1,
+  lastRowsSignature = "";
 const outcomeNames = {
   succeeded: "成功",
   failed: "失败",
@@ -17,7 +21,7 @@ const outcomeNames = {
   incomplete: "未完整记录",
 };
 const sourceNames = {
-  log_captured: "已采集日志",
+  log_captured: "已保存",
   pending: "补全中",
   unavailable: "不可用",
   truncated: "有截断",
@@ -29,6 +33,16 @@ const duration = (n) =>
     : n >= 1000
       ? (n / 1000).toFixed(2) + " s"
       : n.toFixed(0) + " ms";
+const fileSize = (n) =>
+  n == null
+    ? "—"
+    : n >= 1073741824
+      ? (n / 1073741824).toFixed(2) + " GiB"
+      : n >= 1048576
+        ? (n / 1048576).toFixed(2) + " MiB"
+        : n >= 1024
+          ? (n / 1024).toFixed(1) + " KiB"
+          : n + " B";
 const date = (s) =>
   s && !s.startsWith("0001-")
     ? new Date(s).toLocaleString("zh-CN", { hour12: false })
@@ -246,12 +260,15 @@ function clearAuthenticatedView() {
   clearDetailImages();
   detail = null;
   if ($("detail").open) $("detail").close();
+  lastRowsSignature = "";
   $("rows").replaceChildren();
   $("detail-body").replaceChildren();
   $("detail-metrics").replaceChildren();
   $("empty").hidden = false;
   $("connection").textContent = "未连接";
   $("health").textContent = "等待连接";
+  if ($("storage-view").open) $("storage-view").close();
+  $("storage-body").replaceChildren();
   $("total").textContent = "—";
   document
     .querySelectorAll("#stats strong")
@@ -273,6 +290,7 @@ async function refresh() {
     return;
   }
   const seq = ++generation;
+  refreshRequests++;
   try {
     await syncPanelAliases();
     const [page, status] = await Promise.all([
@@ -281,6 +299,9 @@ async function refresh() {
     ]);
     if (seq !== generation) return;
     total = page.total;
+    refreshSeconds = status.refresh_interval_seconds || 1;
+    if (document.activeElement !== $("refresh-interval"))
+      $("refresh-interval").value = refreshSeconds;
     renderRows(page.items);
     $("total").textContent = fmt(total);
     $("connection").textContent = "● 已连接";
@@ -291,7 +312,7 @@ async function refresh() {
         "",
         status.logs_enabled
           ? "上游日志补全已启用"
-          : "上游原文：未配置 logs_dir",
+          : "上游最终结果：未配置 logs_dir",
       ),
       el(
         "div",
@@ -299,14 +320,28 @@ async function refresh() {
         `采集中 ${status.active} · 补全中 ${status.pending_logs} · 丢弃 ${status.dropped_requests}`,
       ),
     );
+    if (status.database_file_bytes != null)
+      $("health").append(
+        el(
+          "div",
+          "",
+          `数据库 ${fileSize(status.database_file_bytes)} · 空闲 / 待复用 ${fileSize(status.database_free_page_bytes)}`,
+        ),
+      );
     if (panelMessage) $("health").append(el("div", "", panelMessage));
     const warnings = [];
+    if (status.database_maintenance_error)
+      warnings.push("数据库整理：" + status.database_maintenance_error);
+    if (status.capacity_evicted_records)
+      warnings.push(
+        `已因容量淘汰 ${fmt(status.capacity_evicted_records)} 条最旧记录。`,
+      );
     if (status.last_error) warnings.push("采集错误：" + status.last_error);
     if (status.dropped_requests)
       warnings.push("部分请求因采集并发超限未被记录，请调整 max_inflight。");
     if (!status.logs_enabled)
       warnings.push(
-        "当前只有下游响应。开启 CPA request-log 并配置插件 logs_dir 后才能补全上游原文。",
+        "当前只有下游响应。开启 CPA request-log 并配置插件 logs_dir 后才能补全上游最终结果。",
       );
     notice(warnings.join(" "));
     const sums = page.items;
@@ -339,9 +374,14 @@ async function refresh() {
       $("connection").textContent = "连接失败";
       throw e;
     }
+  } finally {
+    refreshRequests--;
   }
 }
 function renderRows(items) {
+  const signature = JSON.stringify(items);
+  if (signature === lastRowsSignature) return;
+  lastRowsSignature = signature;
   $("rows").replaceChildren();
   for (const r of items) {
     const tr = el("tr");
@@ -402,7 +442,30 @@ function renderRows(items) {
     );
     if (r.warnings?.length)
       upstream.append(el("small", "", `△ ${r.warnings.length} 条采集提示`));
-    tr.append(time, who, model, state, latency, tokens, upstream);
+    const prompt = el("td"),
+      response = el("td");
+    prompt.append(el("div", "row-preview", r.latest_prompt || "—"));
+    response.append(
+      el(
+        "div",
+        "row-preview",
+        r.latest_response ||
+          (r.upstream_state === "pending"
+            ? "等待上游结果补全…"
+            : "上游结果不可用"),
+      ),
+    );
+    tr.append(
+      time,
+      who,
+      model,
+      state,
+      latency,
+      tokens,
+      upstream,
+      prompt,
+      response,
+    );
     $("rows").append(tr);
   }
 }
@@ -769,7 +832,7 @@ function renderDetail() {
       el(
         "div",
         "view-note",
-        "根据这次请求携带的历史上下文还原。原图由 CPA 保存并通过管理鉴权接口提供，浏览器不会访问图片源站。",
+        "根据这次请求的历史上下文和完整最终结果还原。原图通过 CPA 鉴权接口提供，浏览器不访问源站。",
       ),
     );
     if (!detail.conversation?.length)
@@ -791,9 +854,7 @@ function renderDetail() {
       body.append(bubble(m));
     }
     if (detail.upstream_conversation?.length) {
-      body.append(
-        el("div", "split-marker", "UPSTREAM · 最后一次上游尝试的输出"),
-      );
+      body.append(el("div", "split-marker", "UPSTREAM · 上游完整最终结果"));
       for (const m of detail.upstream_conversation) body.append(bubble(m));
     }
     if (r.error) body.append(el("div", "warnings", r.error));
@@ -826,7 +887,7 @@ function renderDetail() {
       el(
         "div",
         "view-note",
-        "来源：CPA request-log。保留所有上游尝试的请求 / 响应区段，包含原始 SSE。日志格式可能做过脱敏，不能视为网络字节级抓包。",
+        "来源：CPA request-log 的最后一次上游尝试。仅保存请求正文和完整最终结果；SSE 已汇总，非逐事件原文。",
       ),
     );
     if (r.upstream_error || !r.upstream_responses)
@@ -835,15 +896,15 @@ function renderDetail() {
           "div",
           "warnings",
           r.upstream_error ||
-            "上游原文尚不可用。请开启 CPA request-log 并配置 logs_dir；点击“重新读取”检查补全状态。",
+            "上游最终结果尚不可用。请开启 CPA request-log 并配置 logs_dir；点击“重新读取”检查补全状态。",
         ),
       );
     const reload = el("button", "", "重新读取");
     reload.onclick = () => openDetail(r.id);
     body.append(
       reload,
-      section("上游请求（所有尝试）", r.upstream_requests),
-      section("上游响应（所有尝试）", r.upstream_responses),
+      section("最终上游请求正文", r.upstream_requests),
+      section("上游完整最终结果", r.upstream_responses),
     );
   } else if (activeTab === "response") {
     body.append(
@@ -852,7 +913,7 @@ function renderDetail() {
         "view-note",
         "这是 response interceptor 观察到的下游协议响应，流式内容按原顺序拼接；后续插件或宿主还可能修改。",
       ),
-      section("完整响应正文 / SSE", pretty(r.response_body)),
+      section("下游完整最终结果", pretty(r.response_body)),
       section("响应头", JSON.stringify(r.response_headers, null, 2)),
     );
   } else {
@@ -891,6 +952,53 @@ function renderDetail() {
   }
   body.scrollTop = 0;
 }
+$("storage-open").onclick = async () => {
+  if (!managementKey) {
+    $("login").showModal();
+    return;
+  }
+  const revision = authGeneration;
+  const body = $("storage-body");
+  body.replaceChildren(el("p", "muted", "正在统计存储占用…"));
+  $("storage-view").showModal();
+  try {
+    const stats = await api("/storage");
+    if (revision !== authGeneration) return;
+    const list = el("dl", "meta-grid");
+    for (const [label, value] of [
+      ["记录数量", fmt(stats.records)],
+      ["数据库文件", fileSize(stats.database_file_bytes)],
+      ["空闲 / 待复用空间", fileSize(stats.database_free_page_bytes)],
+      ["正文原始合计", fileSize(stats.body_logical_bytes)],
+      ["去重压缩后正文", fileSize(stats.body_stored_bytes)],
+      ["数据库上限", fileSize(stats.max_database_bytes)],
+      ["因容量淘汰记录", fmt(stats.capacity_evicted_records)],
+      ["自动整理", stats.database_maintenance_running ? "进行中" : "待命"],
+    ])
+      list.append(el("dt", "", label), el("dd", "mono", value));
+    body.replaceChildren(
+      list,
+      el(
+        "p",
+        "",
+        "只保存完整最终结果，保留文字、可见思考、工具调用和原图；不保存 SSE 中间事件和已放弃的上游尝试。正文进一步去重压缩。",
+      ),
+      el(
+        "p",
+        "",
+        "容量接近上限时自动淘汰最旧记录并整理空闲页。整理期间正常写入会在切换前重放；原图目录、CPA 源日志及整理临时文件不计入此上限。",
+      ),
+      el(
+        "p",
+        "",
+        "文件增长与后台整理之间可能短暂超过上限；单条记录无法容纳时也会被淘汰。旧版本数据库不兼容，请停止 CPA 并移走旧库后启用新版。",
+      ),
+    );
+  } catch (error) {
+    if (revision === authGeneration)
+      body.replaceChildren(el("p", "error", error.message));
+  }
+};
 $("login-open").onclick = () => $("login").showModal();
 $("refresh").onclick = () => refresh().catch(() => {});
 $("alias-open").onclick = () => {
@@ -968,10 +1076,38 @@ $("export").onclick = () => {
   a.click();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 };
-setInterval(() => {
-  if ($("auto").checked && managementKey && !document.hidden)
-    refresh().catch(() => {});
-}, 5000);
+function scheduleRefresh() {
+  clearTimeout(refreshTimer);
+  if (!$("auto").checked) return;
+  refreshTimer = setTimeout(async () => {
+    if (managementKey && !document.hidden && refreshRequests === 0)
+      await refresh().catch(() => {});
+    scheduleRefresh();
+  }, refreshSeconds * 1000);
+}
+$("auto").onchange = scheduleRefresh;
+$("refresh-interval").onchange = async () => {
+  const seconds = Number($("refresh-interval").value);
+  if (!Number.isInteger(seconds) || seconds < 1 || seconds > 3600) {
+    notice("刷新间隔需为 1 至 3600 秒");
+    return;
+  }
+  if (!managementKey) {
+    $("login").showModal();
+    return;
+  }
+  try {
+    await api("/settings", {
+      method: "POST",
+      body: JSON.stringify({ refresh_interval_seconds: seconds }),
+    });
+    refreshSeconds = seconds;
+    scheduleRefresh();
+  } catch (error) {
+    notice(error.message);
+  }
+};
+scheduleRefresh();
 
 // Storage events are emitted in this iframe when CPAMC edits its saved notes.
 let panelStorageTimer;

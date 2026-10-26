@@ -199,25 +199,7 @@ func recordImageSources(r *Record, limit int) []imageSource {
 	if r.InterceptedBody != "" && r.InterceptedBody != r.RequestBody {
 		msgs = append(msgs, Conversation(r.InterceptedBody, "")...)
 	}
-	// Archive images from every upstream attempt, even though the chat view
-	// deliberately renders only the final attempt's output.
-	for _, raw := range []string{r.UpstreamRequests, r.UpstreamResponses} {
-		locs := sectionPattern.FindAllStringSubmatchIndex(raw, -1)
-		for i, loc := range locs {
-			end := len(raw)
-			if i+1 < len(locs) {
-				end = locs[i+1][0]
-			}
-			if _, body, ok := strings.Cut(raw[loc[1]:end], "Body:\n"); ok {
-				name := raw[loc[2]:loc[3]]
-				if strings.HasPrefix(name, "API REQUEST") {
-					msgs = append(msgs, Conversation(strings.TrimSpace(body), "")...)
-				} else if strings.HasPrefix(name, "API RESPONSE") {
-					msgs = append(msgs, responseMessages(strings.TrimSpace(body))...)
-				}
-			}
-		}
-	}
+	msgs = append(msgs, Conversation(r.UpstreamRequests, r.UpstreamResponses)...)
 	for _, m := range msgs {
 		for _, img := range m.Images {
 			if img.URL == "" {

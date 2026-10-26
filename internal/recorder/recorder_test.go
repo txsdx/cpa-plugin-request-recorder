@@ -86,7 +86,7 @@ func TestStreamingBeyondHostHistoryAndCancellation(t *testing.T) {
 	check(t, e.Complete(wire.Completion{RequestID: "s", Outcome: "canceled", StatusCode: 499}))
 	r, err := e.Get("s")
 	check(t, err)
-	if !strings.Contains(r.ResponseBody, `"0,"`) || !strings.Contains(r.ResponseBody, `"159,"`) || r.TTFTMS != nil || r.FirstChunkMS == nil || len(r.Warnings) == 0 {
+	if !strings.Contains(r.ResponseBody, `0,`) || !strings.Contains(r.ResponseBody, `159,`) || r.TTFTMS != nil || r.FirstChunkMS == nil || len(r.Warnings) == 0 {
 		t.Fatalf("incomplete stream bookkeeping: %+v", r.Summary)
 	}
 	c := Conversation(r.RequestBody, r.ResponseBody)

@@ -1,7 +1,7 @@
 {
   "name": "cpa-plugin-request-recorder",
   "private": true,
-  "version": "0.2.0",
+  "version": "0.3.0",
   "scripts": {
     "test:browser": "node scripts/browser-smoke.cjs",
     "test:panel": "node scripts/browser-panel.cjs"

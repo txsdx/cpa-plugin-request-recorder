@@ -395,19 +395,11 @@ func TestImageQueueOverflowSurvivesRestart(t *testing.T) {
 		t.Fatal("overflow image did not resume", assets)
 	}
 }
-func TestImageDiscoveryIncludesEveryUpstreamAttempt(t *testing.T) {
-	r := recordWithImage("all-attempts", "https://example.com/original.png")
-	r.InterceptedBody = recordWithImage("", "https://example.com/intercepted.png").RequestBody
-	r.UpstreamRequests = "=== API REQUEST 1 ===\nBody:\n" + recordWithImage("", "https://example.com/upstream-input.png").RequestBody + "\n"
-	r.UpstreamResponses = `=== API RESPONSE 1 ===
-Body:
-{"data":[{"url":"https://example.com/first-attempt.png"}]}
-=== API RESPONSE 2 ===
-Body:
-{"data":[{"url":"https://example.com/final-attempt.png"}]}
-`
-	sources := recordImageSources(r, 64)
-	if len(sources) != 5 {
-		t.Fatal("missing image from raw attempt", sources)
+func TestImageDiscoveryIncludesFinalUpstreamRequestAndResponse(t *testing.T) {
+	r := recordWithImage("final", "https://example.com/request.png")
+	r.UpstreamRequests = recordWithImage("", "https://example.com/upstream-input.png").RequestBody
+	r.UpstreamResponses = `{"data":[{"url":"https://example.com/final-output.png"}]}`
+	if sources := recordImageSources(r, 64); len(sources) != 3 {
+		t.Fatal(sources)
 	}
 }

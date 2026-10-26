@@ -15,40 +15,48 @@ var tracePattern = regexp.MustCompile(`^[a-fA-F0-9-]{8,64}$`)
 var sectionPattern = regexp.MustCompile(`(?m)^=== (REQUEST INFO|HEADERS|REQUEST BODY|API REQUEST(?: [0-9]+)?|API RESPONSE(?: [0-9]+)?|API ERROR RESPONSE|RESPONSE|WEBSOCKET TIMELINE|API WEBSOCKET TIMELINE) ===\r?$`)
 
 type LogParts struct {
-	Request, Headers, UpstreamRequests, UpstreamResponses, FinalUpstreamBody string
-	Truncated                                                                bool
+	Request, UpstreamRequests, UpstreamResponses string
+	Attempt                                      int
+	Truncated                                    bool
 }
 
-// CPA's text log is not a byte-framed format. Preserve complete upstream
-// sections for inspection; delimiters inside payload text can be ambiguous.
+// CPA text logs provide the last upstream attempt. Only request bodies and
+// assembled final responses are retained; section wrappers and earlier attempts are discarded.
 func ParseLog(raw string) (LogParts, error) {
 	var p LogParts
 	locs := sectionPattern.FindAllStringSubmatchIndex(raw, -1)
 	hasResponse := false
+	requests := map[int]string{}
+	lastIndex := -1
 	for i, loc := range locs {
 		name := raw[loc[2]:loc[3]]
 		end := len(raw)
 		if i+1 < len(locs) {
 			end = locs[i+1][0]
 		}
-		body := strings.TrimPrefix(raw[loc[1]:end], "\n")
-		body = strings.TrimPrefix(body, "\r\n")
+		body := strings.TrimLeft(raw[loc[1]:end], "\r\n")
 		switch {
 		case name == "REQUEST BODY":
 			p.Request = strings.TrimRight(body, "\r\n")
-		case name == "HEADERS":
-			p.Headers = body
 		case strings.HasPrefix(name, "API REQUEST"):
-			p.UpstreamRequests += raw[loc[0]:end]
+			index := 0
+			_, _ = fmt.Sscanf(name, "API REQUEST %d", &index)
+			if _, value, ok := strings.Cut(body, "Body:\n"); ok {
+				requests[index] = strings.TrimSpace(value)
+			}
 		case strings.HasPrefix(name, "API RESPONSE"):
-			p.UpstreamResponses += raw[loc[0]:end]
-			if _, b, ok := strings.Cut(body, "Body:\n"); ok {
-				p.FinalUpstreamBody = strings.TrimRight(b, "\r\n")
+			index := 0
+			_, _ = fmt.Sscanf(name, "API RESPONSE %d", &index)
+			if _, value, ok := strings.Cut(body, "Body:\n"); ok && index >= lastIndex {
+				lastIndex = index
+				p.UpstreamResponses, _ = FinalResponse(strings.TrimSpace(value))
 			}
 		case name == "RESPONSE":
 			hasResponse = true
 		}
 	}
+	p.Attempt = lastIndex
+	p.UpstreamRequests = requests[lastIndex]
 	if !hasResponse {
 		return p, errors.New("CPA 日志尚未写入终结 RESPONSE 区段")
 	}
@@ -146,7 +154,9 @@ func (e *Engine) enrich(id string, j *logJob) {
 	defer e.mu.Unlock()
 	r, getErr := e.store.Get(id)
 	if getErr != nil {
-		e.error(getErr)
+		if !errors.Is(getErr, ErrNotFound) {
+			e.error(getErr)
+		}
 		delete(e.jobs, id)
 		return
 	}
@@ -154,6 +164,7 @@ func (e *Engine) enrich(id string, j *logJob) {
 		r.UpstreamState = "unavailable"
 		r.UpstreamError = err.Error()
 	} else {
+		r.UpstreamAttempt = p.Attempt
 		r.UpstreamRequests = p.UpstreamRequests
 		r.UpstreamResponses = p.UpstreamResponses
 		r.UpstreamState = "log_captured"
@@ -167,6 +178,7 @@ func (e *Engine) enrich(id string, j *logJob) {
 			addWarning(r, "CPA 源日志含截断或采集不完整标记")
 		}
 	}
+	updatePreviews(r)
 	if saveErr := e.store.Save(r); saveErr != nil {
 		e.error(saveErr)
 		return

@@ -14,6 +14,8 @@ import (
 )
 
 type Config struct {
+	MaxDatabaseBytes            int64  `yaml:"max_database_bytes"`
+	RefreshIntervalSeconds      int    `yaml:"refresh_interval_seconds"`
 	MaxImageFiles               int    `yaml:"max_image_files"`
 	ImagesDir                   string `yaml:"images_dir"`
 	ArchiveRemoteImages         bool   `yaml:"archive_remote_images"`
@@ -32,9 +34,12 @@ type Config struct {
 }
 
 func DefaultConfig() Config {
-	return Config{ArchiveRemoteImages: true, MaxImageFiles: 100000, MaxImageBytes: 20 << 20, MaxImageStorageBytes: 2 << 30, MaxImagesPerRecord: 64, ImageWorkers: 2, ImageDownloadTimeoutSeconds: 20, DBPath: "data/request-recorder.db", RetentionDays: 30, MaxRecords: 100000, MaxBodyBytes: 64 << 20, MaxInflight: 256, MaxMemoryBytes: 256 << 20}
+	return Config{MaxDatabaseBytes: 1 << 30, RefreshIntervalSeconds: 1, ArchiveRemoteImages: true, MaxImageFiles: 100000, MaxImageBytes: 20 << 20, MaxImageStorageBytes: 2 << 30, MaxImagesPerRecord: 64, ImageWorkers: 2, ImageDownloadTimeoutSeconds: 20, DBPath: "data/request-recorder.db", RetentionDays: 30, MaxRecords: 100000, MaxBodyBytes: 64 << 20, MaxInflight: 256, MaxMemoryBytes: 256 << 20}
 }
 func (c Config) Validate() error {
+	if c.MaxDatabaseBytes < 8<<20 || c.RefreshIntervalSeconds < 1 || c.RefreshIntervalSeconds > 3600 {
+		return errors.New("max_database_bytes must be >= 8 MiB; refresh_interval_seconds must be 1..3600")
+	}
 	if c.MaxImageFiles < 1 || c.MaxImageFiles > 1000000 {
 		return errors.New("max_image_files must be 1..1000000")
 	}
@@ -79,10 +84,12 @@ func New(c Config) (*Engine, error) {
 	if err := c.Validate(); err != nil {
 		return nil, err
 	}
+
 	s, err := Open(c.DBPath)
 	if err != nil {
 		return nil, err
 	}
+	s.limit = c.MaxDatabaseBytes
 	e := &Engine{store: s, cfg: c, active: map[string]*active{}, jobs: map[string]*logJob{}, pendingUsage: map[string]wire.Usage{}, skipped: map[string]time.Time{}, stop: make(chan struct{}), done: make(chan struct{})}
 	if err = s.Prune(c.RetentionDays, c.MaxRecords); err != nil {
 		s.Close()
@@ -440,7 +447,13 @@ func (e *Engine) drainUsage() {
 	}
 }
 func (e *Engine) persist(a *active) error {
-	a.record.ResponseBody = a.response.String()
+	var parsed bool
+	a.record.ResponseBody, parsed = FinalResponse(a.response.String())
+	a.record.ResponseSource = "downstream_final_snapshot"
+	if !parsed {
+		addWarning(&a.record, "流式最终结果未能解析，未保存中间事件")
+	}
+	updatePreviews(&a.record)
 	return e.store.Save(&a.record)
 }
 func (e *Engine) Complete(c wire.Completion) error {
@@ -553,13 +566,17 @@ func (e *Engine) maintain() {
 			for id, j := range jobs {
 				e.enrich(id, j)
 			}
+			e.store.requestMaintenance()
 		}
 	}
 }
 func (e *Engine) Status() map[string]any {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	status := map[string]any{"active": len(e.active), "pending_logs": len(e.jobs), "unmatched_usage": len(e.pendingUsage), "dropped_requests": e.dropped, "memory_bytes": e.used, "last_error": e.lastError, "logs_enabled": e.cfg.LogsDir != "", "db_path": e.cfg.DBPath, "retention_days": e.cfg.RetentionDays, "max_body_bytes": e.cfg.MaxBodyBytes, "capture_scope": "model executions reaching CPA request interceptors"}
+	status := map[string]any{"refresh_interval_seconds": e.store.RefreshInterval(e.cfg.RefreshIntervalSeconds), "active": len(e.active), "pending_logs": len(e.jobs), "unmatched_usage": len(e.pendingUsage), "dropped_requests": e.dropped, "memory_bytes": e.used, "last_error": e.lastError, "logs_enabled": e.cfg.LogsDir != "", "db_path": e.cfg.DBPath, "retention_days": e.cfg.RetentionDays, "max_body_bytes": e.cfg.MaxBodyBytes, "capture_scope": "model executions reaching CPA request interceptors"}
+	for key, value := range e.store.storageQuick() {
+		status[key] = value
+	}
 	for key, value := range e.images.status() {
 		status[key] = value
 	}

@@ -3,7 +3,6 @@ package recorder
 import (
 	"encoding/json"
 	"fmt"
-	"sort"
 	"strconv"
 	"strings"
 )
@@ -327,6 +326,12 @@ func requestMessages(raw string) []Message {
 	return out
 }
 func fullResponse(m map[string]any) []Message {
+	if str(m["object"]) == "recorder.final_response" {
+		data, _ := json.Marshal(m["messages"])
+		var messages []Message
+		_ = json.Unmarshal(data, &messages)
+		return messages
+	}
 	out := []Message{}
 	for _, v := range arr(m["data"]) {
 		b := obj(v)
@@ -509,6 +514,20 @@ func responseMessages(raw string) []Message {
 				a.ToolCallID = str(item["call_id"])
 				a.Content = str(item["arguments"])
 			}
+		case "response.output_text.done":
+			b.slot(ri+"text", "assistant", "text").Content = str(m["text"])
+		case "response.function_call_arguments.done":
+			b.slot(ri+"tool", "assistant", "tool_call").Content = str(m["arguments"])
+		case "response.reasoning_summary_text.done", "response.reasoning_text.done":
+			b.slot(ri+"reasoning", "assistant", "reasoning").Content = str(m["text"])
+		case "response.output_item.done":
+			item := obj(m["item"])
+			if str(item["type"]) == "function_call" {
+				a := b.slot(ri+"tool", "assistant", "tool_call")
+				a.Name, a.ToolCallID, a.Content = str(item["name"]), str(item["call_id"]), str(item["arguments"])
+			} else if str(item["type"]) == "image_generation_call" {
+				*b.slot(ri+"image", "assistant", "image") = imageMessage("assistant", item)
+			}
 		case "response.function_call_arguments.delta":
 			b.slot(ri+"tool", "assistant", "tool_call").Content += str(m["delta"])
 		case "response.output_text.delta":
@@ -519,10 +538,7 @@ func responseMessages(raw string) []Message {
 			a := b.slot("error", "system", "error")
 			a.Content = printable(m)
 		}
-		if typ == "response.image_generation_call.partial_image" {
-			a := b.slot(ri+"image", "assistant", "image")
-			*a = imageMessage("assistant", map[string]any{"b64_json": m["partial_image_b64"]})
-		}
+
 		for _, v := range arr(m["candidates"]) {
 			c := obj(v)
 			for j, a := range geminiContent(obj(c["content"])) {
@@ -568,37 +584,9 @@ func Conversation(request, response string) []Message {
 	return out
 }
 func UpstreamConversation(r *Record) []Message {
-	if r.UpstreamResponses == "" {
-		return nil
+	messages := responseMessages(r.UpstreamResponses)
+	for i := range messages {
+		messages[i].Source = "upstream"
 	}
-	// Select the last attempt by its numeric index, while preserving all attempts
-	// in the raw pane. Headers and timestamps remain outside the protocol parser.
-	type attempt struct {
-		index int
-		body  string
-	}
-	parts := []attempt{}
-	locs := sectionPattern.FindAllStringSubmatchIndex(r.UpstreamResponses, -1)
-	for i, loc := range locs {
-		end := len(r.UpstreamResponses)
-		if i+1 < len(locs) {
-			end = locs[i+1][0]
-		}
-		name := r.UpstreamResponses[loc[2]:loc[3]]
-		index := 0
-		_, _ = fmt.Sscanf(name, "API RESPONSE %d", &index)
-		body := r.UpstreamResponses[loc[1]:end]
-		if _, v, ok := strings.Cut(body, "Body:\n"); ok {
-			parts = append(parts, attempt{index, strings.TrimSpace(v)})
-		}
-	}
-	if len(parts) == 0 {
-		return nil
-	}
-	sort.SliceStable(parts, func(i, j int) bool { return parts[i].index < parts[j].index })
-	msgs := responseMessages(parts[len(parts)-1].body)
-	for i := range msgs {
-		msgs[i].Source = "upstream"
-	}
-	return msgs
+	return messages
 }

@@ -10,6 +10,10 @@ plugins:
       enabled: true
       priority: -1000
       db_path: data/request-recorder.db
+      # Active DB cap (1 GiB); oldest records are evicted automatically.
+      # Image files and CPA source logs have separate storage limits.
+      max_database_bytes: 1073741824
+      refresh_interval_seconds: 1
       # Set to CPA's actual log directory (same filesystem/container).
       logs_dir: logs
       # Empty derives data/request-recorder-images/ from db_path.

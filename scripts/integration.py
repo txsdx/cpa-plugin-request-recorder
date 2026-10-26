@@ -136,13 +136,19 @@ plugins:
             else: raise AssertionError('public image access allowed')
             assert (work/'recorder-images'/(image['hash']+'.img')).read_bytes()==base64.b64decode(PNG)
             assert IMAGE in d['record']['upstream_requests']
-            assert 'API RESPONSE 1' in d['record']['upstream_responses']
+            assert d['record']['upstream_responses'] and not d['record']['upstream_responses'].startswith('data: ')
+            assert '图里是什么？' in d['record']['latest_prompt']
+            assert d['record']['latest_response']
             if item['stream']:
-                assert '159,' in d['record']['response_body']
+                assert '159,' in d['record']['response_body'] and not d['record']['response_body'].startswith('data: ')
                 assert item['tokens']['TotalTokens']==260,item
             else:
                 assert any(m.get('images') for m in d['conversation'] if m['source']=='request')
                 assert any(m.get('images') for m in d['upstream_conversation']),d['upstream_conversation']
+        status=json.loads(request('/v0/management/plugins/request-recorder/status'))
+        assert status['refresh_interval_seconds']==1 and status['max_database_bytes']==1073741824
+        storage=json.loads(request('/v0/management/plugins/request-recorder/storage'))
+        assert storage['body_chunks']>0 and storage['body_stored_bytes']>0
         key_id=hashlib.sha256(KEY.encode()).hexdigest()
         sync=json.loads(request('/v0/management/plugins/request-recorder/aliases/sync',{'aliases':{key_id:'CPAMC 自动备注'}}))
         assert sync['synced']==1 and sync['manual_aliases_preserved']
