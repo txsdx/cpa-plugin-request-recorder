@@ -16,4 +16,8 @@ if [[ -z "$sdk_dir" ]]; then
 fi
 assets_dir=${CPA_STORE_ASSETS_DIR:-"$repo_dir/dist"}
 cd "$sdk_dir"
-go run "$repo_dir/scripts/check_store_contract.go" "$assets_dir/registry.json" "$assets_dir" "$1"
+if [[ "${CPA_STORE_CHECK_MODE:-contract}" == "live" ]]; then
+  go run "$repo_dir/scripts/check_live_store.go" "$1"
+else
+  go run "$repo_dir/scripts/check_store_contract.go" "$assets_dir/registry.json" "$assets_dir" "$1"
+fi

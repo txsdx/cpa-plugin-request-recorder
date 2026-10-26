@@ -26,3 +26,18 @@ jobs:
           path: |
             dist/*.zip
             dist/checksums.txt
+
+  published-store:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - name: Install the published plugin through the real CPA store client
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          CPA_STORE_CHECK_MODE: live
+        run: bash scripts/check_store_contract.sh latest

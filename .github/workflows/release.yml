@@ -179,3 +179,9 @@ jobs:
           GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ needs.validate.outputs.tag }}
         run: bash scripts/publish_release.sh
+      - name: Verify published private-store installation
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          CPA_STORE_CHECK_MODE: live
+          VERSION: ${{ needs.validate.outputs.version }}
+        run: bash scripts/check_store_contract.sh "$VERSION"
