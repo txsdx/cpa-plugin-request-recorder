@@ -17,7 +17,7 @@ CLIProxyAPI 的原生插件：在模型请求结束后记录请求与响应，�
 
 ## 下载 Release 安装（无需 Go / Node）
 
-仓库已配置 [Build and release](.github/workflows/release.yml)。推送 `vX.Y.Z` 标签后，测试通过才会自动发布 [GitHub Releases](https://github.com/txsdx/cpa-plugin-request-recorder/releases)。仅推送 main 不发布 Release；也可以在 Actions 手动运行该工作流，只生成构建 artifacts、不发布。仓库私有时，请用有仓库权限的 GitHub 账号登录后下载。
+仓库已配置 [Build and release](.github/workflows/release.yml)：在 Actions 点击 **Run workflow** 就会测试、编译五个平台并发布 [GitHub Release](https://github.com/txsdx/cpa-plugin-request-recorder/releases)。版本可手填；留空则首版为 `0.1.0`，以后按已有正式版本标签自动递增 patch。推送 `vX.Y.Z` 标签也会发布该版本。仅推送 main 不自动发版。仓库私有时，请用有仓库权限的 GitHub 账号下载，CPA 自身也必须配置读取权限。
 
 | CPA 运行平台 | 选择的附件后缀 | 解压后的库 |
 | --- | --- | --- |
@@ -44,7 +44,7 @@ Linux 包在 Debian 12 / glibc 环境原生编译，匹配所检查 CPA Dockerfi
 4. CPAMC 中确认插件 `effective_enabled`，打开“插件资源 → 请求记录”，输入 CPA **管理密钥**。
 5. 发一条测试模型请求。请求结束后刷新列表，检查“上游原文”是否已采集。若不可用，在详情中查看补全原因。
 
-不需要部署独立网站，GUI 已包含在动态库中。该仓库目前没有注册进官方插件商店，不能假定商店搜索或粘贴仓库地址就能自动安装。
+不需要部署独立网站，GUI 已包含在动态库中。不必注册进官方商店：添加本仓库的 `registry.json` 自定义源即可在 CPA 插件商店安装和更新，详见下节。
 
 ### Docker / Compose 路径示例
 
@@ -75,14 +75,76 @@ plugins:
 
 示例假设 CPA 的工作目录和实际请求日志位于 `/CLIProxyAPI`。如果你的镜像使用其他工作目录或 `WRITABLE_PATH`，按实际路径修改。目录要允许容器内 CPA 用户写入。数据库挂载用于保留记录，重建容器后也需要保留。
 
+### 从 CPA 插件商店自动安装 / 一键更新
+
+在 CPAMC 的插件商店来源中添加这个 **registry 文件 URL**（不是仓库主页）：
+
+```text
+https://raw.githubusercontent.com/txsdx/cpa-plugin-request-recorder/main/registry.json
+```
+
+或合并到 CPA 配置：
+
+```yaml
+plugins:
+  enabled: true
+  dir: plugins
+  store-sources:
+    - "https://raw.githubusercontent.com/txsdx/cpa-plugin-request-recorder/main/registry.json"
+```
+
+刷新商店，选择 `CPA Request Recorder · 请求记录`，点击安装。以后刷新检查更新，再点击更新即可。CPA 从仓库的**最新正式 Release**解析版本，自动选择 OS / CPU 对应 zip，校验 `checksums.txt`，并写入带版本的库文件（例如 `plugins/linux/amd64/request-recorder-v0.1.0.so`）。不要为了匹配版本再手动重命名 Release 的 zip 或库。
+
+安装源解决的是下载安装和版本更新。仍需按本文配置 `request-log`、真实 `logs_dir` 和数据库持久化；GUI 通过 CPAMC 插件资源打开。更新是否热加载或要求重启由 CPA 版本及运行平台决定。预发布版本不会被 GitHub latest 接口当作正式更新推送。
+
+**当前仓库是私有仓库。** 仅在浏览器中登录 GitHub 不会赋予 CPA 服务访问权限；需在 **CPA 服务的进程环境**中安全设置 `CPA_PLUGIN_GITHUB_TOKEN`，使用对这个仓库有 Contents 读取权限的凭证，然后合并以下规则。不要把 token 写进 registry URL、配置文件、仓库或聊天。
+
+```yaml
+plugins:
+  store-auth:
+    - match: "https://raw.githubusercontent.com/txsdx/cpa-plugin-request-recorder/"
+      apply-to: [registry]
+      type: github-token
+      token-env: CPA_PLUGIN_GITHUB_TOKEN
+    - match: "https://api.github.com/repos/txsdx/cpa-plugin-request-recorder/"
+      apply-to: [metadata, artifact]
+      type: github-token
+      token-env: CPA_PLUGIN_GITHUB_TOKEN
+```
+
+两条规则分别覆盖 registry 与 Release 元数据 / 资产 API，不把凭证发送到任意下载域名。Docker 需把该环境变量传入 CPA 容器。若以后将仓库设为公开，可省略认证规则，并相应把 registry 的 `auth_required` 改为 false。
+
 ### 维护者发布新版本
 
+推荐打开 [Build and release](https://github.com/txsdx/cpa-plugin-request-recorder/actions/workflows/release.yml)，点击 **Run workflow**：
+
+- `version` 留空：首版 `0.1.0`；已有 `v0.1.0` 时自动发布 `v0.1.1`。
+- 手填 `0.2.0`：发布指定版本；`0.2.0-rc.1` 会标为 prerelease。
+- Action 在**实际测试的提交**上创建标签，所有构建、CPA 安装器兼容测试完成后才公开 Release；不会用未验证的新 main 提交打包。
+
+也可手动推标签：
+
 ```bash
-git tag v0.1.0
+git fetch origin
+git tag v0.1.0 origin/main
 git push origin v0.1.0
 ```
 
-工作流将 Go / JS 检查、发布脚本测试和五个平台的原生构建作为发布前置条件。每个 zip 根目录只有一个动态库，Release 附带统一 `checksums.txt`；库的版本号通过链接参数从标签写入。构建失败不会发布 Release。预发布标签如 `v0.2.0-rc.1` 会标为 prerelease。手动运行只生成 `0.0.0-dev` 构建，已有正式 Release 不会被自动覆盖。不需要另设 PAT，发布 job 使用仓库自带的 `GITHUB_TOKEN`。
+每个正式 Release 必须包含：
+
+```text
+request-recorder_<version>_linux_amd64.zip
+request-recorder_<version>_linux_arm64.zip
+request-recorder_<version>_darwin_amd64.zip
+request-recorder_<version>_darwin_arm64.zip
+request-recorder_<version>_windows_amd64.zip
+checksums.txt
+registry.json
+```
+
+版本不带 `v` 写进附件名，Git 标签带 `v`。ZIP 根目录只有 `request-recorder.so` / `.dylib` / `.dll`，不包含目录、`.h` 文件或其他动态库。发布前会使用固定 CPA 源码中的真实 registry 解析器和安装器校验全部五个平台的实际产物、重复安装、版本判断及校验和拒绝行为。
+
+根目录 `registry.json` 省略可选展示版本，长期作为稳定的商店源；Release 附件中的 registry 由同一元数据自动生成，包含该 Release 版本。CPA 以 GitHub 最新正式 Release 为版本真相，因此更新不需要 Action 回写 main。正式发布版本不会被覆盖，失败只留下可重试的 draft；发布使用仓库自带的 `GITHUB_TOKEN`，不需额外 PAT。
 
 ## 构建和安装
 

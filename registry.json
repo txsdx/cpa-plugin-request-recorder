@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "plugins": [
+    {
+      "id": "request-recorder",
+      "name": "CPA Request Recorder · 请求记录",
+      "description": "记录模型请求、用量和上下游响应，在 CPAMC 中按请求者筛选并回放对话、工具调用与原始图片。需要 CPA plugin schema >= 6；上游原文需要配置 request-log 和 logs_dir。",
+      "author": "txsdx",
+      "repository": "https://github.com/txsdx/cpa-plugin-request-recorder",
+      "homepage": "https://github.com/txsdx/cpa-plugin-request-recorder#readme",
+      "auth_required": true,
+      "tags": ["Interceptor", "Management", "Observability"]
+    }
+  ]
+}

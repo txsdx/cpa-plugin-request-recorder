@@ -3,6 +3,7 @@ import hashlib
 import os
 from pathlib import Path
 import sys
+import subprocess
 import zipfile
 
 from package import EXTENSIONS, validate_version
@@ -11,9 +12,22 @@ TARGETS = [('linux', 'amd64'), ('linux', 'arm64'), ('darwin', 'amd64'),
            ('darwin', 'arm64'), ('windows', 'amd64')]
 
 
-def version_from_ref(ref_type, ref_name):
+def version_from_ref(ref_type, ref_name, requested='', tags=()):
     if ref_type != 'tag':
-        return '0.0.0-dev'
+        if requested.strip():
+            return validate_version(requested.strip().removeprefix('v'))
+        stable = []
+        for tag in tags:
+            try:
+                version = validate_version(tag.removeprefix('v'))
+                if '-' not in version:
+                    stable.append(tuple(map(int, version.split('.'))))
+            except ValueError:
+                continue
+        if not stable:
+            return '0.1.0'
+        major, minor, patch = max(stable)
+        return f'{major}.{minor}.{patch+1}'
     if not ref_name.startswith('v'):
         raise ValueError('release tags must start with v')
     return validate_version(ref_name[1:])
@@ -42,6 +56,10 @@ if __name__ == '__main__':
     if sys.argv[1:] == ['--verify-assets']:
         verify_assets(Path('dist'), os.environ['VERSION'])
     elif not sys.argv[1:]:
-        print('version=' + version_from_ref(os.environ['GITHUB_REF_TYPE'], os.environ['GITHUB_REF_NAME']))
+        tags = subprocess.check_output(['git', 'tag', '--list'], text=True).splitlines()
+        version = version_from_ref(os.environ['GITHUB_REF_TYPE'], os.environ['GITHUB_REF_NAME'],
+                                   os.environ.get('REQUESTED_VERSION', ''), tags)
+        print('version=' + version)
+        print('tag=v' + version)
     else:
         raise SystemExit('usage: release_metadata.py [--verify-assets]')

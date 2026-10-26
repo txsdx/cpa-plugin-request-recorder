@@ -21,3 +21,4 @@ dev:
 	$(GO) run ./cmd/recorder
 package: build
 	python3 scripts/package.py $(VERSION) $(GOOS) $(GOARCH) $(EXT)
+	python3 scripts/generate_registry.py --version $(VERSION)

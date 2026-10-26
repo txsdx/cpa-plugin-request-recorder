@@ -15,3 +15,10 @@
 | [mmqz/cpa-multi-plugins](https://github.com/mmqz/cpa-multi-plugins) | 参考插件库打包形态和插件商店单库 zip + checksums.txt 约定 |
 
 真实宿主测试发现当前 CPA 的 lifecycle RequestID 和 UsageReporter RequestID 可以不同。因此用量优先匹配 exact ID，再按**完整 TraceID**唯一关联，必要时以模型排除候选；存在歧义时保留待匹配状态，不将 A 的 key 或 token 写到 B 的记录。回归测试覆盖这两类 ID 差异、并发隔离及重试 usage 去重。
+
+
+## 插件商店兼容性
+
+发布 registry 使用 CPA `schema_version: 1` 的 GitHub Release 模式。核对了同一固定 CPA 提交中的 `internal/pluginstore/registry.go`、`github.go`、`install.go`：版本取自 `/releases/latest`，zip 名由 `ArchiveName(id,version,goos,goarch)` 计算，安装器校验 `checksums.txt`，并将根目录动态库写成带版本的安装文件。`scripts/check_store_contract.go` 调用官方公开 SDK，通过本地测试 HTTP 传输提供实际构建产物；生产插件本身不新增 CPA module 依赖。
+
+私有仓库使用 `store-auth` 的 `github-token` 规则。官方客户端在已配置 artifact API 认证时优先使用 Release asset API，并在重定向时重新按目的地解析认证，因此凭证不跟随到无匹配规则的外部域名。
