@@ -114,7 +114,7 @@ jobs:
         run: |
           go test -race ./...
           mkdir -p dist
-          CGO_ENABLED=1 go build -trimpath -buildmode=c-shared \
+          CGO_ENABLED=1 go build -buildvcs=false -trimpath -buildmode=c-shared \
             -ldflags "-X github.com/txsdx/cpa-plugin-request-recorder/internal/recorder.Version=$VERSION" \
             -o "dist/request-recorder.${{ matrix.os == 'windows' && 'dll' || 'dylib' }}" ./cmd/plugin
           python scripts/package.py "$VERSION" "$GOOS" "$GOARCH" "${{ matrix.os == 'windows' && 'dll' || 'dylib' }}"

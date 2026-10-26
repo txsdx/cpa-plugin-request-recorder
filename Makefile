@@ -16,7 +16,7 @@ test:
 	python3 -m unittest discover -s scripts -p 'test_*.py'
 build:
 	mkdir -p dist
-	CGO_ENABLED=1 $(GO) build -trimpath -buildmode=c-shared -ldflags "-X github.com/txsdx/cpa-plugin-request-recorder/internal/recorder.Version=$(VERSION)" -o dist/request-recorder.$(EXT) ./cmd/plugin
+	CGO_ENABLED=1 $(GO) build -buildvcs=false -trimpath -buildmode=c-shared -ldflags "-X github.com/txsdx/cpa-plugin-request-recorder/internal/recorder.Version=$(VERSION)" -o dist/request-recorder.$(EXT) ./cmd/plugin
 dev:
 	$(GO) run ./cmd/recorder
 package: build
