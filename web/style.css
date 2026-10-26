@@ -813,9 +813,7 @@ table {
 .col-tokens {
   width: 6rem;
 }
-.col-upstream {
-  width: 5rem;
-}
+
 td {
   vertical-align: top;
   overflow-wrap: anywhere;

@@ -386,8 +386,23 @@ func events(raw string) []map[string]any {
 		if joined == "" || joined == "[DONE]" {
 			continue
 		}
-		if m := decode(joined); m != nil {
-			out = append(out, m)
+		// Some callbacks contain several data lines without SSE blank lines,
+		// or concatenate complete data: payloads. JSON decoding preserves text
+		// containing literal "data:" while retaining those event boundaries.
+		for joined != "" {
+			joined = strings.TrimSpace(strings.TrimPrefix(joined, "data:"))
+			if joined == "" || joined == "[DONE]" {
+				break
+			}
+			decoder := json.NewDecoder(strings.NewReader(joined))
+			var m map[string]any
+			if err := decoder.Decode(&m); err != nil {
+				break
+			}
+			if m != nil {
+				out = append(out, m)
+			}
+			joined = strings.TrimSpace(joined[decoder.InputOffset():])
 		}
 	}
 	return out
@@ -422,7 +437,7 @@ func responseMessages(raw string) []Message {
 	var terminal []Message
 	for _, m := range ev {
 		typ := str(m["type"])
-		if (typ == "response.completed" || typ == "response.incomplete" || typ == "response.failed") && obj(m["response"]) != nil {
+		if isResponseTerminal(typ) && obj(m["response"]) != nil {
 			terminal = fullResponse(obj(m["response"]))
 			if typ != "response.completed" {
 				terminal = append(terminal, message("system", "notice", typ))
@@ -586,11 +601,4 @@ func resolveToolNames(out []Message) {
 			out[i].Name = names[out[i].ToolCallID]
 		}
 	}
-}
-func UpstreamConversation(r *Record) []Message {
-	messages := responseMessages(r.UpstreamResponses)
-	for i := range messages {
-		messages[i].Source = "upstream"
-	}
-	return messages
 }

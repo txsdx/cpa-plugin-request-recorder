@@ -21,14 +21,13 @@ func TestBodyStorageLosslessDedupAcrossShiftedHistoryAndImages(t *testing.T) {
 	var logical int64
 	for i := 0; i < 12; i++ {
 		request := fmt.Sprintf(`{"prefix":%q,"image":"data:image/png;base64,%s"}`, strings.Repeat("prefix", i+1), base64Body)
-		upstream := fmt.Sprintf("=== API REQUEST 1 ===\nBody:\n%s\n", request)
 		response := strings.Repeat("data: {\"type\":\"response.output_text.delta\",\"delta\":\"完整文字\"}\n\n", 1000) + "data: [DONE]\n\n"
-		r := &Record{Summary: Summary{ID: fmt.Sprint(i), StartedAt: time.Now()}, RequestBody: request, InterceptedBody: request, UpstreamRequests: upstream, ResponseBody: response, UpstreamResponses: response}
-		logical += int64(3*len(request) + len(upstream) - len(request) + 2*len(response))
+		r := &Record{Summary: Summary{ID: fmt.Sprint(i), StartedAt: time.Now()}, RequestBody: request, ResponseBody: response}
+		logical += int64(len(request) + len(response))
 		check(t, s.Save(r))
 		got, err := s.Get(r.ID)
 		check(t, err)
-		if got.RequestBody != request || got.InterceptedBody != request || got.UpstreamRequests != upstream || got.ResponseBody != response || got.UpstreamResponses != response {
+		if got.RequestBody != request || got.ResponseBody != response {
 			t.Fatal("body round trip changed original bytes")
 		}
 	}

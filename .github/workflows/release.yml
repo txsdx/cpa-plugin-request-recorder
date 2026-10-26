@@ -153,7 +153,7 @@ jobs:
           if-no-files-found: error
 
   runtime:
-    name: Real CPA capture with and without request-log
+    name: Real CPA Responses snapshots without request-log
     needs: [validate, linux]
     runs-on: ubuntu-24.04
     steps:
@@ -189,7 +189,6 @@ jobs:
       - name: Verify complete conversations and original images
         run: |
           CPA_BIN="$RUNNER_TEMP/recorder-cpa-host" python3 scripts/integration.py
-          RECORDER_TEST_LOGS=0 CPA_BIN="$RUNNER_TEMP/recorder-cpa-host" python3 scripts/integration.py
 
   publish:
     needs: [validate, linux, desktop, runtime]

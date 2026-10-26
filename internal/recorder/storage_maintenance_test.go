@@ -119,25 +119,10 @@ func TestFinalResponsesDropEventsAndRetainReasoningToolsAndImages(t *testing.T) 
 	}
 }
 
-func TestFinalUpstreamAttemptAndLatestPreviews(t *testing.T) {
-	raw := strings.Replace(logFixture, "=== RESPONSE ===", `=== API REQUEST 2 ===
-Body:
-{"model":"new","messages":[{"role":"user","content":"最新提示词"}]}
-=== API RESPONSE 2 ===
-Body:
-data: {"choices":[{"index":0,"delta":{"content":"上游最终"}}]}
-
-data: {"choices":[{"index":0,"delta":{"content":"答案"}}]}
-
-=== RESPONSE ===`, 1)
-	parts, err := ParseLog(raw)
-	check(t, err)
-	if parts.Attempt != 2 || strings.Contains(parts.UpstreamResponses, "hello upstream") || strings.Contains(parts.UpstreamResponses, "data:") || !strings.Contains(parts.UpstreamResponses, "上游最终答案") {
-		t.Fatal(parts)
-	}
-	r := &Record{RequestBody: `{"messages":[{"role":"user","content":"旧问题"},{"role":"assistant","content":"旧答案"},{"role":"user","content":"最新问题"}]}`, UpstreamResponses: parts.UpstreamResponses}
+func TestLatestPromptAndResponsePreviews(t *testing.T) {
+	r := &Record{RequestBody: `{"messages":[{"role":"user","content":"旧问题"},{"role":"assistant","content":"旧答案"},{"role":"user","content":"最新问题"}]}`, ResponseBody: `{"output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"最新答案"}]}]}`}
 	updatePreviews(r)
-	if r.LatestPrompt != "最新问题" || r.LatestResponse != "上游最终答案" {
+	if r.LatestPrompt != "最新问题" || r.LatestResponse != "最新答案" {
 		t.Fatal(r.Summary)
 	}
 }

@@ -32,7 +32,7 @@ type storedRecord struct {
 }
 
 func recordBodyFields(r *Record) map[string]*string {
-	return map[string]*string{"conversation_history": &r.ConversationHistory, "request_body": &r.RequestBody, "intercepted_body": &r.InterceptedBody, "response_body": &r.ResponseBody, "upstream_requests": &r.UpstreamRequests, "upstream_responses": &r.UpstreamResponses}
+	return map[string]*string{"conversation_history": &r.ConversationHistory, "request_body": &r.RequestBody, "response_body": &r.ResponseBody}
 }
 
 // A content-defined boundary realigns after insertions. Shared conversation
@@ -174,9 +174,12 @@ func decodeStoredRecord(tx *bolt.Tx, raw []byte) (*Record, error) {
 		return nil, errors.New("unsupported record storage version")
 	}
 	fields := recordBodyFields(&stored.Record)
-	for name, manifest := range stored.Bodies {
-		field, ok := fields[name]
-		if !ok || manifest.Size < 1 || len(manifest.Chunks) == 0 || manifest.Size < len(manifest.Chunks) || manifest.Size/maxChunkSize > len(manifest.Chunks) {
+	for name, field := range fields {
+		manifest, exists := stored.Bodies[name]
+		if !exists {
+			continue
+		}
+		if manifest.Size < 1 || len(manifest.Chunks) == 0 || manifest.Size < len(manifest.Chunks) || manifest.Size/maxChunkSize > len(manifest.Chunks) {
 			return nil, errors.New("invalid body manifest")
 		}
 		var body strings.Builder

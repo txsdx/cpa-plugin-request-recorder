@@ -1,7 +1,6 @@
 # Merge into the existing CPA config, do not replace provider/auth settings.
 # Legacy keys below also work with the examined CPA v8 compatibility loader.
-# Optional: enable only for extra provider pre-translation body capture.
-# Model results are captured by response hooks even with request-log disabled.
+# The recorder does not read CPA request logs.
 request-log: false
 usage-statistics-enabled: true
 plugins:
@@ -16,8 +15,6 @@ plugins:
       # Image files and CPA source logs have separate storage limits.
       max_database_bytes: 1073741824
       refresh_interval_seconds: 1
-      # Optional: set to CPA's actual log directory when request-log is enabled.
-      logs_dir: ""
       # Empty derives data/request-recorder-images/ from db_path.
       images_dir: ""
       archive_remote_images: true

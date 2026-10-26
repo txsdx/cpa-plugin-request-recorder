@@ -383,25 +383,8 @@ func (s *Store) ByTrace(trace string) ([]Summary, error) {
 	return out, err
 }
 
-func (s *Store) PendingLogs() ([]Summary, error) {
-	out := []Summary{}
-	err := s.view(func(tx *bolt.Tx) error {
-		return tx.Bucket(summaries).ForEach(func(_, v []byte) error {
-			var r Summary
-			if err := json.Unmarshal(v, &r); err != nil {
-				return err
-			}
-			if r.UpstreamState == "pending" && len(out) < 4096 {
-				out = append(out, r)
-			}
-			return nil
-		})
-	})
-	return out, err
-}
-
 // Image metadata is separate from large request bodies. Download progress updates
-// cannot overwrite concurrent usage/log enrichment or rewrite multi-MiB bodies.
+// cannot overwrite concurrent usage updates or rewrite multi-MiB bodies.
 func (s *Store) GetImages(id string) ([]ImageAsset, error) {
 	out := []ImageAsset{}
 	err := s.view(func(tx *bolt.Tx) error {

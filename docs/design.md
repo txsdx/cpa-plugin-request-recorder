@@ -16,9 +16,6 @@ flowchart LR
   CPA --> Usage[usage.handle]
   Usage --> Join[RequestID 优先 / 完整 TraceID 唯一关联]
   Join --> DB
-  U --> Logs[CPA request-log]
-  Logs --> Enrich[末尾8位 trace 关联 / 稳定文件检测]
-  Enrich --> DB
   DB --> Images[异步内嵌解码 / 公网 HTTPS 下载]
   Images --> Files[(插件图片目录)]
   Files --> API[CPA 鉴权管理 API]
@@ -29,7 +26,7 @@ flowchart LR
 ## 请求标识与生命周期
 
 - lifecycle RequestID 用于采集和用量关联，持久化以稳定会话 ID 原子替换最新记录。完整 TraceID 对应最新请求和多次上游尝试。
-- before-auth 抓取当时的正文；响应 hook 的 OriginalRequest 存在时采用宿主原始请求副本。after-auth 的正文另存，绝不假定它是执行器翻译后的真正上游请求。
+- before-auth 抓取当时的正文；响应 hook 的 OriginalRequest 存在时采用宿主原始请求副本。after-auth 仅补充身份和路由元数据，不另存执行中间请求正文。
 - header-init stream 事件用来缓存原请求与头部，不把它视为首分片；payload chunk 按顺序拼接。结束、失败、拒绝和取消以 terminal callback 为准。
 - usage 回调可以先于或后于 completion，且 UsageReporter RequestID 可能不同。使用完整 TraceID 唯一匹配；同 trace 下多个同模型执行时不猜测归属。
 - usage_attempts 按 reporter ID 去重，token 聚合包括重试尝试。缓存读取比例：OpenAI / Gemini 为 cache-read / input；原生 Claude 为 cache-read / (uncached input + cache read + cache creation)。原始计数同时保留。总耗时取 lifecycle 开始/结束，TTFT 取宿主 usage 数据，首分片耗时单独显示。
@@ -39,7 +36,7 @@ flowchart LR
 
 响应 hook 的分片只在内存中累计，终结时汇总为最终 JSON；不保存 SSE 中间事件。Responses 使用最终 response 快照，Chat / Claude / Gemini 的增量按文本、可见思考、工具调用和原图组装。不能解析或截断时显示不完整状态，不把残缺内容称为完整结果。
 
-模型最终结果不依赖日志。仅服务商协议转换前正文使用可选的 CPA 日志补全：按 trace 关联，等大小稳定与终结 RESPONSE 后，仅选最后一次 API RESPONSE 的完整最终结果，以及同索引的 API REQUEST 正文。此前失败尝试的正文、事件流、时间戳 / 头部包装不导入数据库；usage_attempts 继续保存重试消耗元数据。补全有容量和 30 秒等待限制。
+插件只使用用户请求与 CPA 响应，不读取 CPA request-log；已删除服务商侧结果、日志补全队列和配置。非流式 JSON 直接保存；Responses 完整结束回调直接保存 response，释放分片缓冲。没有完整 output 时优先使用 output_item.done 的完整输出项，最后才回退分片汇总。CPA 有些回调是缺少 SSE 空行的数据行，需要在回调边界正确补全分隔；原文中的 data: 字符串不能误当分隔。
 
 最终快照不是原始 TLS / HTTP 抓包。原请求仍完整保存，未被插件观察到的 previous_response_id 历史和未返回的工具结果不能凭空恢复。
 
@@ -53,7 +50,7 @@ flowchart LR
 
 CPAMC 的 key 备注是本地浏览器数据，指纹为 SHA-256(JSON.stringify(["api-key-name", apiBase, apiKey]))。连接后按当前 CPA key 列表在浏览器匹配，再同步插件的 SHA-256(apiKey) / 备注快照；只传指纹与名称，持久化到独立自动别名 bucket。原子替换自动快照，手动别名优先，不回写 CPAMC。跨来源、无浏览器备注或认证插件主体 ID 不匹配时不能推测名称。
 
-图片解析支持原始 data URL / base64 / URL。v0.2.0 将可识别的图片异步归档到插件目录：内嵌数据解码，公网 HTTPS URL 由 CPA 后台获取；原始正文不改写。归档扫描原请求、选取凭证后的请求、下游最终结果和最后一次上游请求 / 结果。相同来源在记录内去重，相同内容跨记录共用以 SHA-256 命名的文件，扩展名根据实际字节为 png / jpg / gif / webp / bmp / avif；已有 .img 自有文件按内容重命名，不改变原图字节。
+图片解析支持原始 data URL / base64 / URL。v0.2.0 将可识别的图片异步归档到插件目录：内嵌数据解码，公网 HTTPS URL 由 CPA 后台获取；原始正文不改写。归档扫描原请求、选取凭证后的请求、CPA 返回给客户端的完整结果。相同来源在记录内去重，相同内容跨记录共用以 SHA-256 命名的文件，扩展名根据实际字节为 png / jpg / gif / webp / bmp / avif；已有 .img 自有文件按内容重命名，不改变原图字节。
 
 预览按需解码为 WebP（质量 75、最长边 1600），仅缓存于 32 MiB / 64 张的内存 LRU；原图下载是单独的鉴权请求。预览并发 1、解码面积上限 3200 万像素，动画预览首帧，失败不自动回退原图。发布库携带解码器，无需部署系统图片服务。
 
@@ -73,14 +70,13 @@ v0.4.0 每个会话只保存最新完整分支。按 API key / 调用主体隔�
 
 - v0.4.0 会话正文按内容边界分块（4–64 KiB），每块用 SHA-256 标识并按需 gzip；跨字段和记录共用，引用计数按每条记录的唯一块集合维护。独立元数据行保存正文清单，解码验证长度、gzip 与 SHA-256；仅使用新存储格式；旧数据库被明确拒绝，不实现迁移。
 - bbolt 事务原子保存正文清单、块与引用计数、摘要、时间索引、trace 索引与图片待处理标记；列表只读摘要，详情才读取正文。默认 `data/request-recorder.db` 相对 CPA 工作目录。
-- 图片默认在数据库旁的 `<数据库名>-images/`，可配置 `images_dir`。独立 bbolt bucket 存图片索引，下载状态更新不重写巨大正文或覆盖并发的 usage / 日志补全。
+- 图片默认在数据库旁的 `<数据库名>-images/`，可配置 `images_dir`。独立 bbolt bucket 存图片索引，下载状态更新不重写巨大正文或覆盖并发的 usage 更新。
 - 图片工作标记持久化、内存队列有界；重启和队列溢出后续处理。图片写入使用受目录约束的 `os.Root`、随机临时文件、fsync 和 rename；读取校验摘要 / 大小 / MIME，不公开目录。目录应由插件独占。
 - 图片有单体字节、总字节、文件数和每条记录数量配额；不驱逐被引用的图片。记录清理同时删除图片索引，每分钟扫描无引用文件，至少 5 分钟宽限后删除，不碰其他命名的文件。
 - 迁移 / 停机备份应同时复制数据库和图片目录；CPA 原始请求日志仍在 CPA 的实际日志目录，插件运行错误进入 CPA 进程日志。以上文件不加密，TLS 不加密磁盘。
 - GUI 使用真实 key / 备注，无需管理指纹；内部 key 别名按摘要动态关联，因此修改别名会反映到历史记录。认证插件的 APIKey 字段可能是主体 ID，需按宿主实际暴露的标识绑定。
 - 采集中正文受单体大小、总内存预算和并发数限制。达到上限可截断或跳过新采集，不更改客户端响应；status 暴露丢弃数。内存预算不包括 Go runtime、JSON 编解码、bbolt mmap 和后台日志导入，不能当作进程 RSS 上限。
 - 采集中的正文暂存在内存，正常关闭时写 incomplete；进程崩溃/强杀前未终结的请求可能丢失。这一版不是逐分片 fsync 的审计系统。
-- 记录已写入但待补全的日志任务会在进程重启时从数据库 pending 标记重新排队，再尝试补全 30 秒；队列上限 4096。
 - 最大 30 分钟等待 terminal callback，超时保存 incomplete。存储失败会在 status 和宿主日志中报告。
 - 保留期限/数量定期删除记录，不删除 CPA 源日志，不擦除磁盘旧页，按容量与空闲比例自动整理，复制一致快照并重放期间有界写入，短暂屏障下替换工作库。活动数据库上限默认 1 GiB，自动淘汰最旧记录；写入和整理间可短暂超限，临时文件另计。新格式库不能用旧插件读取。不能把此保留策略当作安全擦除。
 

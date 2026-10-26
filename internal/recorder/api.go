@@ -17,7 +17,7 @@ const APIBase = "/v0/management/plugins/" + PluginID
 const ResourceBase = "/v0/resource/plugins/" + PluginID
 
 // Version is injected from the validated release tag by the build.
-var Version = "0.4.0"
+var Version = "0.5.0"
 
 func Registration() map[string]any {
 	return map[string]any{"schema_version": 6, "metadata": map[string]any{
@@ -36,7 +36,6 @@ func Registration() map[string]any {
 			{"Name": "max_images_per_record", "Type": "integer", "Description": "每条记录最多归档图片数"},
 			{"Name": "image_workers", "Type": "integer", "Description": "后台图片下载并发数"},
 			{"Name": "image_download_timeout_seconds", "Type": "integer", "Description": "单张图片下载超时秒数"},
-			{"Name": "logs_dir", "Type": "string", "Description": "CPA request-log 目录，用于关联上游原文"},
 			{"Name": "retention_days", "Type": "integer", "Description": "保留天数，0 不按时间清理"},
 			{"Name": "max_records", "Type": "integer", "Description": "最多条目数，0 不限制"},
 			{"Name": "max_body_bytes", "Type": "integer", "Description": "单份请求/响应最大采集字节数，超限明确标记"},
@@ -129,7 +128,6 @@ func (e *Engine) Management(req wire.ManagementRequest, web fs.FS) wire.Manageme
 				return result(500, map[string]string{"error": "database read failed"})
 			}
 			messages := conversationMessages(r)
-			upstream := UpstreamConversation(r)
 			if r.Images == nil {
 				if !e.images.pending(r.ID) {
 					e.images.enqueue(r.ID)
@@ -145,7 +143,6 @@ func (e *Engine) Management(req wire.ManagementRequest, web fs.FS) wire.Manageme
 				}
 			}
 			e.images.decorate(messages, r.Images)
-			e.images.decorate(upstream, r.Images)
 			if req.Query.Get("view") == "chat" {
 				// Base64 originals must not travel in hidden raw fields when the
 				// browser only needs the conversation and WebP thumbnails.
@@ -153,7 +150,7 @@ func (e *Engine) Management(req wire.ManagementRequest, web fs.FS) wire.Manageme
 					*body = ""
 				}
 			}
-			return result(200, map[string]any{"record": r, "conversation": messages, "upstream_conversation": upstream})
+			return result(200, map[string]any{"record": r, "conversation": messages})
 		case "/images":
 			id := req.Query.Get("record_id")
 			assets, err := e.store.GetImages(id)

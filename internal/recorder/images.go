@@ -209,10 +209,6 @@ func recordImageSources(r *Record, limit int) []imageSource {
 	sources := []imageSource{}
 	seen := map[string]bool{}
 	msgs := conversationMessages(r)
-	if r.InterceptedBody != "" && r.InterceptedBody != r.RequestBody {
-		msgs = append(msgs, Conversation(r.InterceptedBody, "")...)
-	}
-	msgs = append(msgs, Conversation(r.UpstreamRequests, r.UpstreamResponses)...)
 	for _, m := range msgs {
 		for _, img := range m.Images {
 			if img.URL == "" {

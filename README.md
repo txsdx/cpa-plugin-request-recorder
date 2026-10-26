@@ -4,17 +4,17 @@ CLIProxyAPI 的原生插件：在模型请求结束后更新完整会话，在 *
 
 ## 已实现
 
-- 普通 JSON 与 SSE 在内存中按序汇总；请求结束后只保存完整最终结果，不落盘 SSE 中间事件。
+- 普通 JSON 直接保存；Responses 流式优先直接保存 `response.completed.response` 完整结束快照，收到后释放中间事件。缺少完整快照时才使用完整输出项或增量兜底，不落盘 SSE 中间事件。
 - 成功、失败、拒绝、取消分别记录。达到大小/内存限制、没有完整响应时明确提示。
 - 每个会话只保留一条最新完整历史：文字、可见思考、工具调用 / 返回、原图；后续轮次覆盖旧快照，保留完整对话。原请求和耗时 / 用量元数据对应最新一轮。
-- 模型回答直接由响应回调采集并合并，不依赖 request-log。另可从 CPA 日志补充服务商协议转换前的最后一次请求 / 结果。
+- 只依据用户请求与 CPA 给用户的响应还原会话，不读取 CPA 请求日志；已删除“服务商侧结果”、日志扫描 / 补全队列及相关配置。
 - 按实际 API key、CPAMC 备注 / key 别名、模型、提供商、会话、思考深度、状态、时间范围、最小耗时筛选；自动读取当前 key 列表，无需输入或管理指纹。
 - 查看请求时间、总耗时、宿主 TTFT、首分片耗时、输入/输出/思考/cache read/cache creation token 与缓存比例；缺失指标显示 `—`。
 - 对话回放支持 OpenAI Chat Completions / Responses、Claude Messages、Gemini：系统指令、用户消息、模型输出、公开的思考内容/摘要、工具名、调用参数、调用 ID、工具返回值。
 - **显示原始图片**：OpenAI `image_url` / `input_image`、Claude base64/url source、Gemini inlineData/fileData、OpenAI 图片生成 `b64_json` / Responses `image_generation_call`。内嵌图片和公网 HTTPS 图片由 CPA 服务端保存到插件图片目录，通过管理鉴权接口展示 WebP 压缩预览，点击下载时才传输原图；浏览器不访问图片源站。原始多模态字段保留在正文和 JSON 导出中。
 - 本地 bbolt 持久化、摘要/时间/trace 索引、分页、历史别名修改、保留期限和条目上限、JSON 导出。无需外部数据库。
 
-**重要边界：**纯插件钩子不能承诺记录所有 HTTP 入口。未进入请求拦截器的鉴权失败、路由前错误、非模型接口不在当前采集范围；WebSocket 专用响应事件和 multipart 二进制正文回放尚未实现。模型最终结果来自 CPA 回调；可选的服务商侧结果明确标注为“转换前”。详见 [设计与数据边界](docs/design.md)。
+**重要边界：**纯插件钩子不能承诺记录所有 HTTP 入口。未进入请求拦截器的鉴权失败、路由前错误、非模型接口不在当前采集范围；WebSocket 专用响应事件和 multipart 二进制正文回放尚未实现。模型最终结果来自 CPA 响应回调。详见 [设计与数据边界](docs/design.md)。
 
 ## 下载 Release 安装（无需 Go / Node）
 
@@ -30,18 +30,18 @@ CLIProxyAPI 的原生插件：在模型请求结束后更新完整会话，在 *
 
 Linux 包在 Debian 12 / glibc 环境原生编译，匹配所检查 CPA Dockerfile 的系统基线；Alpine / musl 和 Windows ARM64 不包含在这五种发布目标中。Docker 部署应按 **容器内部** 的 OS / 架构选择，不是按浏览器或宿主桌面系统选择。
 
-以 Linux amd64 `v0.4.0` 为例：
+以 Linux amd64 `v0.5.0` 为例：
 
-1. 下载 `request-recorder_0.4.0_linux_amd64.zip` 和 `checksums.txt`，放在同一目录。
+1. 下载 `request-recorder_0.5.0_linux_amd64.zip` 和 `checksums.txt`，放在同一目录。
 2. 校验并解压到 CPA 的插件目录：
 
    ```bash
    sha256sum --ignore-missing --check checksums.txt
    mkdir -p /path/to/CLIProxyAPI/plugins/linux/amd64
-   unzip request-recorder_0.4.0_linux_amd64.zip -d /path/to/CLIProxyAPI/plugins/linux/amd64
+   unzip request-recorder_0.5.0_linux_amd64.zip -d /path/to/CLIProxyAPI/plugins/linux/amd64
    ```
 
-3. 合并下面的插件配置，设置数据库持久化，然后重启 CPA。日志补全可选。
+3. 合并下面的插件配置，设置数据库持久化，然后重启 CPA。无需配置日志目录。
 4. CPAMC 中确认插件 `effective_enabled`，打开“插件资源 → 请求记录”，同源 CPAMC 已保存登录时会自动连接，否则输入 CPA **管理密钥**。
 5. 发一条测试模型请求。请求结束后刷新列表，检查“模型最终结果”和会话回放；无需先开启请求日志。
 
@@ -55,7 +55,6 @@ Linux 包在 Debian 12 / glibc 环境原生编译，匹配所检查 CPA Dockerfi
 volumes:
   - ./plugins:/CLIProxyAPI/plugins
   - ./recorder-data:/CLIProxyAPI/recorder-data
-  - ./logs:/CLIProxyAPI/logs
 ```
 
 将库放在宿主机 `./plugins/linux/amd64/request-recorder.so`（ARM64 则用 `arm64` 子目录）。插件配置使用容器内路径：
@@ -71,10 +70,9 @@ plugins:
       enabled: true
       priority: -1000
       db_path: /CLIProxyAPI/recorder-data/request-recorder.db
-      logs_dir: ""
 ```
 
-示例假设 CPA 的工作目录和实际请求日志位于 `/CLIProxyAPI`。如果你的镜像使用其他工作目录或 `WRITABLE_PATH`，按实际路径修改。目录要允许容器内 CPA 用户写入。这里的 `recorder-data` 挂载同时保留数据库和默认图片目录 `/CLIProxyAPI/recorder-data/request-recorder-images/`；重建容器后需要保留整个目录。
+示例假设 CPA 的工作目录位于 `/CLIProxyAPI`。如果你的镜像使用其他工作目录，按实际路径修改。目录要允许容器内 CPA 用户写入。这里的 `recorder-data` 挂载同时保留数据库和默认图片目录 `/CLIProxyAPI/recorder-data/request-recorder-images/`；重建容器后需要保留整个目录。
 
 ### 从 CPA 插件商店自动安装 / 一键更新
 
@@ -94,7 +92,7 @@ plugins:
     - "https://raw.githubusercontent.com/txsdx/cpa-plugin-request-recorder/main/registry.json"
 ```
 
-刷新商店，选择 `CPA Request Recorder · 请求记录`，点击安装。以后刷新检查更新，再点击更新即可。CPA 从仓库的**最新正式 Release**解析版本，自动选择 OS / CPU 对应 zip，校验 `checksums.txt`，并写入带版本的库文件（例如 `plugins/linux/amd64/request-recorder-v0.4.0.so`）。不要为了匹配版本再手动重命名 Release 的 zip 或库。
+刷新商店，选择 `CPA Request Recorder · 请求记录`，点击安装。以后刷新检查更新，再点击更新即可。CPA 从仓库的**最新正式 Release**解析版本，自动选择 OS / CPU 对应 zip，校验 `checksums.txt`，并写入带版本的库文件（例如 `plugins/linux/amd64/request-recorder-v0.5.0.so`）。不要为了匹配版本再手动重命名 Release 的 zip 或库。
 
 安装源解决的是下载安装和版本更新。仍需按本文配置数据库持久化；GUI 通过 CPAMC 插件资源打开。更新是否热加载或要求重启由 CPA 版本及运行平台决定。预发布版本不会被 GitHub latest 接口当作正式更新推送。
 
@@ -121,7 +119,7 @@ plugins:
 
 - `version` 留空：首版 `0.1.0`；已有 `v0.1.0` 时自动发布 `v0.1.1`。
 - 手填 `0.2.0`：发布指定版本；`0.2.0-rc.1` 会标为 prerelease。
-- Action 在**实际测试的提交**上创建标签，所有构建、真实 CPA 的有 / 无日志会话采集及安装器兼容测试完成后才公开 Release；不会用未验证的新 main 提交打包。
+- Action 在**实际测试的提交**上创建标签，所有构建、真实 CPA 的无日志完整快照采集及安装器兼容测试完成后才公开 Release；不会用未验证的新 main 提交打包。
 
 也可手动推标签：
 
@@ -181,12 +179,11 @@ plugins:
       enabled: true
       priority: -1000
       db_path: data/request-recorder.db
-      logs_dir: ""
 ```
 
 以上旧式配置键由本轮验证的 CPA v8 兼容加载器支持。如果使用 v8 嵌套配置，请设置 `observability.logs.request-log: false` 和 `observability.usage.usage-statistics-enabled: true`；已有 v8 值优先于旧式值。
 
-`logs_dir` 必须是 **CPA 实际写入请求日志的目录**，不是随便新建的路径。CPA 可能使用工作目录的 `logs/`、`WRITABLE_PATH/logs` 或 auth 目录下的 `logs/`；容器内必须能访问同一个目录。**模型回答不依赖日志**：响应拦截器直接接收模型返回给客户端的文本 / 工具 / 图片，流式内容在结束时合并成一份最终结果。仅需要服务商协议转换前正文时，启用 `request-log: true`（v8 为 `observability.logs.request-log: true`）并填写真实 `logs_dir`。插件只对待补全请求做有界检查，通常数秒内完成，最长 30 秒；不是用日志轮询代替模型回答采集。CPA 自己的源日志独立占空间，不受插件数据库配额控制。
+插件不读取 CPA 请求日志，`request-log` 可以保持关闭；`logs_dir` 已删除。普通 JSON 直接保存原始响应，Responses 流式优先保存完整结束快照；快照缺少 output 时优先使用 output_item.done 的完整输出项，仅在接口没有完整结果时使用分片兜底。旧配置中可移除 logs_dir。
 
 启动 / 重启 CPA 后，在 CPAMC 插件列表确认 `effective_enabled`，打开资源菜单“请求记录”。直接资源路径为：
 
@@ -212,7 +209,7 @@ plugins:
 
 ## 每个会话只保留最新完整历史
 
-这里的方向是：**下游客户端（例如 Codex / Cherry Studio）→ CPA → 上游模型服务商**。模型回答从服务商经 CPA 返回客户端。详情中的“模型最终结果”就是这份模型回答在 CPA 回调中的完整结果；“服务商侧结果”额外展示协议转换前正文。
+这里的方向是：**下游客户端（例如 Codex / Cherry Studio）→ CPA → 上游模型服务商**。模型回答从服务商经 CPA 返回客户端。详情中的“模型最终结果”就是这份模型回答在 CPA 回调中的完整结果；插件仅记录 CPA 返回给客户端的结果，不另行采集服务商协议转换前正文。
 
 同一 API key 下，优先使用客户端明确传入的会话 / 线程 ID（例如 `X-Session-ID`、`X-Conversation-ID`、`Session_id` 或正文中的 `conversation_id` / `thread_id` / `session_id`）；`previous_response_id` 可关联插件已经记录过的 Responses 历史。没有明确 ID 时，按请求重发的完整上下文和已记录回答精确接续，系统指令与工具配置也参与区分；不会只按 key / 模型或相似提示词合并，也不把宿主缓存 / 路由 / 执行 ID 当会话 ID。
 
@@ -227,7 +224,6 @@ plugins:
 | `max_database_bytes` | `1073741824` | 活动数据库文件上限 1 GiB，最小 8 MiB；自动淘汰最旧条目并整理。图片、CPA 日志、整理临时文件另计 |
 | `refresh_interval_seconds` | `1` | 列表自动刷新间隔，1–3600 秒；GUI 可修改并持久化覆盖此默认值 |
 | `db_path` | `data/request-recorder.db` | 相对 CPA 工作目录；一个数据库只能由一个插件实例写入 |
-| `logs_dir` | 空 | 可选：服务商转换前正文补全；模型最终结果无需此项 |
 | `images_dir` | 数据库旁的 `<数据库名>-images/` | 默认 `data/request-recorder-images/`，可用绝对路径指定 |
 | `archive_remote_images` | `true` | 后台保存公网 HTTPS 图片；关闭后仍保存内嵌图片 |
 | `preview_quality` | `75` | 在线 WebP 预览画质，1–100；原图不改动 |
@@ -240,7 +236,7 @@ plugins:
 | `image_download_timeout_seconds` | `20` | 每张图片总下载超时，允许 1 至 120 秒 |
 | `retention_days` | `30` | 记录保留天数；`0` 不按时间删除 |
 | `max_records` | `100000` | 会话数量上限，每分钟清理；`0` 不限制 |
-| `max_body_bytes` | `67108864` | 每份请求 / 响应及完整会话上限 64 MiB；采集超限标记截断，合并历史超限则保留前一快照并报告错误 |
+| `max_body_bytes` | `67108864` | 每份用户请求 / CPA 响应及完整会话上限 64 MiB；采集超限标记截断，合并历史超限则保留前一快照并报告错误 |
 | `max_memory_bytes` | `268435456` | 正在采集正文的总预算 256 MiB；不是 Go 进程总 RSS 上限 |
 | `max_inflight` | `256` | 同时采集请求上限，超过时计入 `dropped_requests` |
 
@@ -248,7 +244,7 @@ plugins:
 
 ### 最终结果存储、容量限制与自动整理
 
-v0.4.0 **只保存完整最终结果**：非流式结果保留完整 JSON；Responses 优先使用最终 `response` 快照，其他支持的流式协议汇总为一份消息快照，包含文字、可见思考、工具调用和原图。SSE 中间事件、重复完成快照、进度事件以及已放弃的上游尝试正文不会持久化。上游请求只保存最后一次尝试的正文，日志里的时间戳 / 响应头等包装不再复制进数据库。失败或截断只保存能恢复的部分，并标记原因，不补造内容。
+v0.4.0 **只保存完整最终结果**：非流式结果保留完整 JSON；Responses 优先使用最终 `response` 快照，其他支持的流式协议汇总为一份消息快照，包含文字、可见思考、工具调用和原图。SSE 中间事件、重复完成快照和进度事件不会持久化；不读取或复制 CPA 请求日志。失败或截断只保存能恢复的部分，并标记原因，不补造内容。
 
 汇总快照是可检查的**最终结果**，不是逐事件原文或网络抓包。原请求仍完整保留；工具返回值如果在请求上下文中，仍在聊天历史中显示。usage_attempts 保留重试用量和耗时，因此不会因为只保留最终正文而少算消耗。
 
@@ -260,13 +256,15 @@ v0.4.0 **只保存完整最终结果**：非流式结果保留完整 JSON；Resp
 
 GUI 的 **存储占用** 区分活动文件、空闲页、正文合计、去重压缩后正文、容量淘汰数与整理状态。`GET /status` 提供轻量统计，`GET /storage` 显式遍历清单 / 块头进行详细统计，避免每秒扫描大库。
 
-**v0.4.0 会话结构不兼容旧数据库。** 按本次升级约定，请先停止 CPA 并删除或移走旧 `.db`，再启用 v0.4.0；插件不迁移旧库，也不会悄悄把旧库当空库打开。旧图片目录中不再被记录引用的自有图片文件会由常规清理回收。
+**v0.5.0 可继续读取 v0.4.0 会话数据库。** 已经只保存了错误占位文本的响应无法从该占位符自行补回；原始请求日志仍在时可离线恢复。更早的旧格式不兼容。
+
+**v0.4.0 会话结构不兼容 v0.3.x 及更早数据库。** 按本次升级约定，请先停止 CPA 并删除或移走旧 `.db`，再启用 v0.4.0；插件不迁移旧库，也不会悄悄把旧库当空库打开。旧图片目录中不再被记录引用的自有图片文件会由常规清理回收。
 
 ### 列表与刷新
 
 顶部控制按钮置于左侧下方，避开 CPAMC 右上角浮层；手动刷新保留在“管理 key 别名”所在的列表工具栏。自动刷新默认开启，每秒更新；工具栏可以修改 1–3600 秒的间隔，设置保存在插件数据库。关闭自动刷新时仍可手动刷新。后台采集不受这些 UI 设置影响。
 
-列表区域宽度为视口的 90%，最后两列为**最新用户提示词**与**模型最新响应**，共用剩余宽度。元数据列使用紧凑宽度，预览最多显示六行；点击条目查看全文。模型回答无需等待日志；来源说明区分 CPA 返回的客户端协议与可选的服务商转换前正文。打开的会话在新轮次到达时随列表刷新。窄屏在列表内部横向滚动。自动刷新跳过正在进行的刷新，不重复创建请求；数据未变化时不重建条目。
+列表区域宽度为视口的 90%，最后两列为**最新用户提示词**与**模型最新响应**，共用剩余宽度。元数据列使用紧凑宽度，预览最多显示六行；点击条目查看全文。列表保留 8 列，移除服务商侧结果列，为提示词和回答提供更多宽度。打开的会话在新轮次到达时随列表刷新。窄屏在列表内部横向滚动。自动刷新跳过正在进行的刷新，不重复创建请求；数据未变化时不重建条目。
 
 ### 对话、图片和日志存在哪里
 
@@ -274,14 +272,14 @@ GUI 的 **存储占用** 区分活动文件、空闲页、正文合计、去重�
 
 | 内容 | 默认存储位置 |
 | --- | --- |
-| 最新原请求、模型最终结果、可选服务商正文、完整会话与最新用量元数据、图片索引 | `data/request-recorder.db`（bbolt） |
+| 最新原请求、模型最终结果、完整会话与最新用量元数据、图片索引 | `data/request-recorder.db`（bbolt） |
 | 已归档原图 | `data/request-recorder-images/<图片内容 SHA-256>.png` 等 |
-| CPA 原始请求日志 | CPA 自己的日志目录；插件的 `logs_dir` 必须指向它 |
+| CPA 原始请求日志 | 由 CPA 自身管理，插件不读取 |
 | 插件运行错误日志 | CPA 进程日志，由 CPA 的日志配置决定 |
 
 聊天视图读取数据库中唯一的最新完整消息历史，没有额外聊天历史文件。base64 图片仍保留在原始正文中，另外解码为原图文件；远程图片保留原 URL，并把下载成功的原始字节保存为文件。文件扩展名按实际图片字节识别为 `.png` / `.jpg` / `.gif` / `.webp` / `.bmp` / `.avif`，不依赖 URL 后缀或错误的 Content-Type，不转码、不压缩。已有插件目录的 `.img` 自有文件在启动时按内容改名；查看和下载也使用对应类型。内容相同的图片在插件目录内去重。
 
-**自 v0.2.0 起**，请求结束、上游最终结果补全后异步归档图片，不等待下载才返回模型响应。任务随正文持久化，内存队列满或重启后继续；旧记录在第一次打开时补归档。已有记录的远程链接若已过期，无法补回；需要额外鉴权的图片也不会擅自复用管理密钥或上游凭证。失败在 GUI 显示原因，可点击“重试服务端保存”，没有浏览器直连源站的回退。
+请求结束后异步归档图片，不等待下载才返回模型响应。任务随正文持久化，内存队列满或重启后继续；旧记录在第一次打开时补归档。已有记录的远程链接若已过期，无法补回；需要额外鉴权的图片也不会擅自复用管理密钥或上游凭证。失败在 GUI 显示原因，可点击“重试服务端保存”，没有浏览器直连源站的回退。
 
 查看时，浏览器仅向同一个 CPA 的管理 API 发送带管理密钥的图片请求，再用临时 Blob URL 展示；详情关闭后释放 Blob URL。列表详情与放大框只读取 WebP 压缩预览（默认质量 75、最长边 1600，保持比例、小图不放大）；只有点击“下载原图”才读取原始文件。预览采用有损压缩，静态展示动画的第一帧，不用于替换归档原图。预览解码上限 3200 万像素，失败时仍可下载原图；不会自动回退传输大原图。聊天详情按需加载：初次打开不传输藏在原文 / 历史字段里的 base64 原图；只有切换原文页签或导出 JSON 时再读取完整正文。服务器预览缓存仅在内存中，LRU 上限 32 MiB / 64 张、编码并发 1，不写入数据库或图片目录；重启后按需重建。图片服务看到的是 **CPA 服务器或其出口代理的 IP**。GUI 的 CSP 只允许 Blob 图片，不加载远程图片。插件不另开图片服务端口，浏览器到插件的传输沿用 CPA 的 TLS 设置。
 
@@ -300,10 +298,10 @@ GUI 的 **存储占用** 区分活动文件、空闲页、正文合计、去重�
 | 方法 / 路径 | 作用 |
 | --- | --- |
 | `GET /records` | 摘要列表、筛选、分页 |
-| `GET /record?id=…` | 最新会话原文、完整对话与可选服务商结果；GUI 初次打开用 `view=chat` 省略大正文，原文页签 / 导出再加载 |
+| `GET /record?id=…` | 最新会话原文与完整对话；GUI 初次打开用 `view=chat` 省略大正文，原文页签 / 导出再加载 |
 | `GET /storage` | 活动文件、空闲页、容量淘汰、压缩去重后正文与整理状态 |
 | `POST /settings` | `{"refresh_interval_seconds":1}`，设置列表刷新间隔 |
-| `GET /status` | 采集、日志补全、用量、存储错误，以及图片目录 / 配额 / 待处理数 |
+| `GET /status` | 采集、用量、存储错误，以及图片目录 / 配额 / 待处理数 |
 | `GET /images?record_id=…` | 图片归档状态；轮询不重新读取巨大正文 |
 | `GET /image?record_id=…&id=…&variant=preview` | 返回该会话原图的 WebP 压缩预览，同样需要管理鉴权 |
 | `GET /image?record_id=…&id=…&variant=original` | 下载归档原图，原始字节与实际类型不变；省略 variant 也返回原图，不接受任意 URL |
@@ -329,7 +327,7 @@ make package                      # 动态库、单库 zip、checksums.txt
 CPA_BIN=/absolute/path/to/cli-proxy-api python3 scripts/integration.py
 ```
 
-实际验证 CPA 源码 `307803510bce87f986fcf7b1a84190f105c7b4aa`：动态库装载、CPAMC 菜单资源、管理鉴权、普通/160 分片流式请求、usage 关联、上游最终结果补全、请求/响应原图文件落盘与鉴权读取、别名筛选均通过。没有连接真实用户的 CPA 实例；线上模型和各版本宿主的行为需要部署后验证。
+实际验证 CPA 源码 `307803510bce87f986fcf7b1a84190f105c7b4aa`：动态库装载、CPAMC 菜单资源、管理鉴权、普通/160 分片流式请求、usage 关联、完整 Responses 结束快照直接保存、请求/响应原图文件落盘与鉴权读取、别名筛选均通过。没有连接真实用户的 CPA 实例；线上模型和各版本宿主的行为需要部署后验证。
 
 独立 GUI 开发服务器与插件共用实现，只用于开发，不是生产部署所必需的服务：
 
@@ -346,7 +344,7 @@ CHROMIUM_PATH=/usr/bin/chromium npm run test:browser
 CHROMIUM_PATH=/usr/bin/chromium npm run test:panel
 ```
 
-已验证登录、筛选、详情页签、会话 / 服务商侧原图实际解码、别名修改、移动宽度及没有 JS 错误；图片读取携带管理鉴权，详情关闭后释放 Blob URL，注入外部图片 URL 后浏览器仍无外部请求。CPAMC 同源存储兼容测试覆盖自动登录、中文备注、历史筛选、动态更新、手动优先、退出清空和跨服务凭据拒绝。下载器测试覆盖内网 / 元数据拒绝、混合 DNS、重定向、TLS 验证、CONNECT 出口代理、容量、重启与队列溢出恢复、损坏修复和保留清理。前端运行和插件构建均不需要安装 npm 依赖，npm 仅用于浏览器测试。
+已验证登录、筛选、详情页签、会话原图的 WebP 预览与原图下载、别名修改、移动宽度及没有 JS 错误；图片读取携带管理鉴权，详情关闭后释放 Blob URL，注入外部图片 URL 后浏览器仍无外部请求。CPAMC 同源存储兼容测试覆盖自动登录、中文备注、历史筛选、动态更新、手动优先、退出清空和跨服务凭据拒绝。下载器测试覆盖内网 / 元数据拒绝、混合 DNS、重定向、TLS 验证、CONNECT 出口代理、容量、重启与队列溢出恢复、损坏修复和保留清理。前端运行和插件构建均不需要安装 npm 依赖，npm 仅用于浏览器测试。
 
 ## 参考资料
 

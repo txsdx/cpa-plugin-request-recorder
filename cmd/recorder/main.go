@@ -23,7 +23,6 @@ import (
 func main() {
 	addr := flag.String("listen", "127.0.0.1:8787", "development listen address")
 	db := flag.String("db", "data/request-recorder.db", "database")
-	logs := flag.String("logs-dir", "", "CPA logs directory")
 	flag.Parse()
 	token := os.Getenv("RECORDER_MANAGEMENT_KEY")
 	if token == "" {
@@ -31,7 +30,6 @@ func main() {
 	}
 	c := recorder.DefaultConfig()
 	c.DBPath = *db
-	c.LogsDir = *logs
 	e, err := recorder.New(c)
 	if err != nil {
 		log.Fatal(err)

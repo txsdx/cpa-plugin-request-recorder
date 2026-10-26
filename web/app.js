@@ -21,12 +21,6 @@ const outcomeNames = {
   rejected: "已拒绝",
   incomplete: "未完整记录",
 };
-const sourceNames = {
-  log_captured: "已保存",
-  pending: "补全中",
-  unavailable: "未采集（可选）",
-  truncated: "有截断",
-};
 const fmt = (n) => (n == null ? "—" : Number(n).toLocaleString("zh-CN"));
 const duration = (n) =>
   n == null
@@ -355,17 +349,11 @@ async function refresh() {
     $("connection").textContent = "● 已连接";
     $("connection").className = "";
     $("health").replaceChildren(
+      el("div", "", "依据用户请求与 CPA 响应还原 · 优先保存完整结束快照"),
       el(
         "div",
         "",
-        status.logs_enabled
-          ? "模型最终结果：直接采集 · 服务商侧结果：日志补全已启用"
-          : "模型最终结果：直接采集 · 服务商侧转换前结果：未启用（可选）",
-      ),
-      el(
-        "div",
-        "",
-        `采集中 ${status.active} · 补全中 ${status.pending_logs} · 丢弃 ${status.dropped_requests}`,
+        `采集中 ${status.active} · 丢弃 ${status.dropped_requests}`,
       ),
     );
     if (status.database_file_bytes != null)
@@ -482,50 +470,15 @@ function renderRows(items) {
       latency.append(el("small", "", `首分片 ${duration(r.first_chunk_ms)}`));
     const tokens = el("td", "mono", fmt(r.tokens?.TotalTokens));
     tokens.append(el("small", "", `缓存 ${pct(r.cache_ratio)}`));
-    const upstream = el("td");
-    upstream.append(
-      el(
-        "span",
-        "badge " +
-          (r.upstream_state === "pending"
-            ? "pending"
-            : r.upstream_state === "log_captured"
-              ? ""
-              : "incomplete"),
-        r.upstream_state === "unavailable" && !r.upstream_error
-          ? "未启用"
-          : sourceNames[r.upstream_state] || "未知",
-      ),
-    );
     if (r.warnings?.length)
-      upstream.append(el("small", "", `△ ${r.warnings.length} 条采集提示`));
+      state.append(el("small", "", `△ ${r.warnings.length} 条采集提示`));
     const prompt = el("td"),
       response = el("td");
     prompt.append(el("div", "row-preview", r.latest_prompt || "—"));
     response.append(
       el("div", "row-preview", r.latest_response || "点击条目查看模型最终结果"),
     );
-    if (r.latest_response_source)
-      response.append(
-        el(
-          "small",
-          "",
-          r.latest_response_source === "provider_response"
-            ? "服务商侧 · 转换前"
-            : "CPA 返回 · 客户端协议",
-        ),
-      );
-    tr.append(
-      time,
-      who,
-      model,
-      state,
-      latency,
-      tokens,
-      upstream,
-      prompt,
-      response,
-    );
+    tr.append(time, who, model, state, latency, tokens, prompt, response);
     $("rows").append(tr);
   }
   renderKeyChoices();
@@ -716,10 +669,7 @@ function scheduleImagePoll() {
       let changed = false,
         pending = false;
       detail.record.images = state.images;
-      for (const m of [
-        ...(detail.conversation || []),
-        ...(detail.upstream_conversation || []),
-      ]) {
+      for (const m of detail.conversation || []) {
         for (const im of m.images || []) {
           const asset = byID.get(im.id);
           let status =
@@ -961,44 +911,12 @@ function renderDetail() {
       raw(JSON.stringify(r.request_headers, null, 2)),
     );
     body.append(h);
-    if (r.intercepted_body)
-      body.append(
-        section(
-          "选取凭证后的请求正文（仍可能在协议转换前）",
-          pretty(r.intercepted_body),
-        ),
-      );
-  } else if (activeTab === "upstream") {
-    body.append(
-      el(
-        "div",
-        "view-note",
-        "来源：CPA request-log 的最后一次上游尝试。仅保存请求正文和完整最终结果；SSE 已汇总，非逐事件原文。",
-      ),
-    );
-    if (r.upstream_error || !r.upstream_responses)
-      body.append(
-        el(
-          "div",
-          "warnings",
-          r.upstream_error ||
-            "模型最终回答已由回调直接记录。此页是可选的服务商转换前结果；如需查看，再启用 CPA request-log 并配置 logs_dir。",
-        ),
-      );
-    const reload = el("button", "", "重新读取");
-    reload.onclick = () => openDetail(r.id);
-    body.append(
-      reload,
-      section("服务商侧请求正文（转换前）", pretty(r.upstream_requests)),
-      section("服务商侧最终结果（转换前）", pretty(r.upstream_responses)),
-    );
-    for (const m of detail.upstream_conversation || []) body.append(bubble(m));
   } else if (activeTab === "response") {
     body.append(
       el(
         "div",
         "view-note",
-        "来自 CPA 响应回调的模型最终结果；流式分片已合并，可能已转换为客户端使用的协议，无需开启请求日志。",
+        "来自 CPA 响应回调的模型最终结果；优先保存完整结束快照；缺少快照时使用完整输出项或分片兜底，无需开启请求日志。",
       ),
       section("模型最终结果（CPA 响应回调）", pretty(r.response_body)),
       section("响应头", JSON.stringify(r.response_headers, null, 2)),
@@ -1010,12 +928,9 @@ function renderDetail() {
       "caller_scope",
       "request_body",
       "conversation_history",
-      "intercepted_body",
       "request_headers",
       "response_headers",
       "response_body",
-      "upstream_requests",
-      "upstream_responses",
     ])
       delete meta[k];
     const dl = el("dl", "meta-grid");
@@ -1071,7 +986,7 @@ $("storage-open").onclick = async () => {
       el(
         "p",
         "",
-        "只保存完整最终结果，保留文字、可见思考、工具调用和原图；不保存 SSE 中间事件和已放弃的上游尝试。正文进一步去重压缩。",
+        "只保存用户请求、模型最终结果和最新会话，保留文字、可见思考、工具调用和原图；不保存 SSE 中间事件。正文进一步去重压缩。",
       ),
       el(
         "p",

@@ -401,11 +401,10 @@ func TestImageQueueOverflowSurvivesRestart(t *testing.T) {
 		t.Fatal("overflow image did not resume", assets)
 	}
 }
-func TestImageDiscoveryIncludesFinalUpstreamRequestAndResponse(t *testing.T) {
+func TestImageDiscoveryIncludesClientRequestAndCPAResponse(t *testing.T) {
 	r := recordWithImage("final", "https://example.com/request.png")
-	r.UpstreamRequests = recordWithImage("", "https://example.com/upstream-input.png").RequestBody
-	r.UpstreamResponses = `{"data":[{"url":"https://example.com/final-output.png"}]}`
-	if sources := recordImageSources(r, 64); len(sources) != 3 {
+	r.ResponseBody = `{"data":[{"url":"https://example.com/response.png"}]}`
+	if sources := recordImageSources(r, 64); len(sources) != 2 {
 		t.Fatal(sources)
 	}
 }

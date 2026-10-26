@@ -27,7 +27,6 @@ type Config struct {
 	ImageWorkers                int    `yaml:"image_workers"`
 	ImageDownloadTimeoutSeconds int    `yaml:"image_download_timeout_seconds"`
 	DBPath                      string `yaml:"db_path"`
-	LogsDir                     string `yaml:"logs_dir"`
 	RetentionDays               int    `yaml:"retention_days"`
 	MaxRecords                  int    `yaml:"max_records"`
 	MaxBodyBytes                int    `yaml:"max_body_bytes"`
@@ -60,14 +59,8 @@ func (c Config) Validate() error {
 type active struct {
 	record   Record
 	response bytes.Buffer
+	snapshot string
 	size     int
-}
-type logJob struct {
-	trace             string
-	started, deadline time.Time
-	path              string
-	size              int64
-	stable            int
 }
 type Engine struct {
 	images       *imageArchive
@@ -78,7 +71,6 @@ type Engine struct {
 	pendingUsage map[string]wire.Usage
 	skipped      map[string]time.Time
 	finished     map[string]time.Time
-	jobs         map[string]*logJob
 	used         int
 	dropped      uint64
 	lastError    string
@@ -97,19 +89,10 @@ func New(c Config) (*Engine, error) {
 	}
 	s.limit = c.MaxDatabaseBytes
 	s.historyLimit = c.MaxBodyBytes
-	e := &Engine{store: s, cfg: c, active: map[string]*active{}, jobs: map[string]*logJob{}, pendingUsage: map[string]wire.Usage{}, skipped: map[string]time.Time{}, finished: map[string]time.Time{}, stop: make(chan struct{}), done: make(chan struct{})}
+	e := &Engine{store: s, cfg: c, active: map[string]*active{}, pendingUsage: map[string]wire.Usage{}, skipped: map[string]time.Time{}, finished: map[string]time.Time{}, stop: make(chan struct{}), done: make(chan struct{})}
 	if err = s.Prune(c.RetentionDays, c.MaxRecords); err != nil {
 		s.Close()
 		return nil, err
-	}
-	// Resume log enrichment after a host restart; terminal records are durable.
-	pending, err := s.PendingLogs()
-	if err != nil {
-		s.Close()
-		return nil, err
-	}
-	for _, r := range pending {
-		e.jobs[r.ID] = &logJob{trace: r.TraceID, started: r.StartedAt, deadline: time.Now().Add(30 * time.Second)}
 	}
 	e.images, err = newImageArchive(c, s)
 	if err != nil {
@@ -160,7 +143,7 @@ func (e *Engine) ensure(id string) *active {
 		e.skipped[id] = time.Now()
 		return nil
 	}
-	a := &active{record: Record{Summary: Summary{ID: id, StartedAt: time.Now(), Outcome: "pending", UpstreamState: "unavailable", Warnings: []string{}}, RequestSource: "interceptor", ResponseSource: "downstream_interceptor"}}
+	a := &active{record: Record{Summary: Summary{ID: id, StartedAt: time.Now(), Outcome: "pending", Warnings: []string{}}, RequestSource: "interceptor", ResponseSource: "downstream_interceptor"}}
 	e.active[id] = a
 	return a
 }
@@ -194,11 +177,6 @@ func (e *Engine) Request(req wire.Request, after bool) error {
 	if !after && r.RequestBody == "" {
 		r.RequestBody = e.capture(a, req.Body)
 		r.RequestHeaders = safeHeaders(req.Headers)
-	}
-	if after {
-		e.used -= len(r.InterceptedBody)
-		a.size -= len(r.InterceptedBody)
-		r.InterceptedBody = e.capture(a, req.Body)
 	}
 	r.TraceID = req.TraceID
 	r.Format = req.SourceFormat
@@ -251,7 +229,7 @@ func (e *Engine) Response(req wire.Response, stream bool) error {
 		return nil
 	}
 	r := &a.record
-	if len(req.OriginalRequest) > 0 && r.RequestSource != "cpa_request_log" {
+	if len(req.OriginalRequest) > 0 {
 		e.used -= len(r.RequestBody)
 		a.size -= len(r.RequestBody)
 		r.RequestBody = e.capture(a, req.OriginalRequest)
@@ -266,18 +244,47 @@ func (e *Engine) Response(req wire.Response, stream bool) error {
 		return nil
 	}
 	if len(req.Body) > 0 {
+		if r.FirstChunkMS == nil {
+			v := ms(time.Since(r.StartedAt))
+			r.FirstChunkMS = &v
+		}
+		{
+			snapshot, ok := callbackSnapshot(req.Body)
+			if !stream && json.Valid(req.Body) {
+				snapshot, ok = string(req.Body), true
+			}
+			if ok && len(snapshot) <= e.cfg.MaxBodyBytes {
+				previous := a.response.Len() + len(a.snapshot)
+				if len(snapshot) <= e.cfg.MaxMemoryBytes-e.used+previous {
+					e.used += len(snapshot) - previous
+					a.size += len(snapshot) - previous
+					a.response = bytes.Buffer{}
+					a.snapshot = snapshot
+					warnings := r.Warnings[:0]
+					for _, warning := range r.Warnings {
+						if warning != "响应达到采集容量限制，记录已截断" {
+							warnings = append(warnings, warning)
+						}
+					}
+					r.Warnings = warnings
+					return nil
+				}
+			}
+			if a.snapshot != "" {
+				return nil
+			}
+		}
 		// CPA may pass a decoded SSE data payload (one bare JSON object),
 		// rather than wire-format "data:" frames. Keep its event boundary
 		// before accumulating, otherwise adjacent JSON objects become invalid.
-		if stream && (json.Valid(req.Body) || strings.TrimSpace(string(req.Body)) == "[DONE]") {
+		payload := bytes.TrimSpace(req.Body)
+		if stream && bytes.HasPrefix(payload, []byte("data:")) && (json.Valid(bytes.TrimSpace(payload[5:])) || string(bytes.TrimSpace(payload[5:])) == "[DONE]") {
+			req.Body = append(append([]byte{}, payload...), '\n', '\n')
+		} else if stream && (json.Valid(req.Body) || strings.TrimSpace(string(req.Body)) == "[DONE]") {
 			framed := make([]byte, 0, len(req.Body)+8)
 			framed = append(framed, "data: "...)
 			framed = append(framed, req.Body...)
 			req.Body = append(framed, '\n', '\n')
-		}
-		if r.FirstChunkMS == nil {
-			v := ms(time.Since(r.StartedAt))
-			r.FirstChunkMS = &v
 		}
 		remaining := e.cfg.MaxBodyBytes - a.response.Len()
 		n := len(req.Body)
@@ -469,9 +476,14 @@ func (e *Engine) drainUsage() {
 	}
 }
 func (e *Engine) persist(a *active) error {
-	var parsed bool
-	a.record.ResponseBody, parsed = FinalResponse(a.response.String())
-	a.record.ResponseSource = "downstream_final_snapshot"
+	parsed := true
+	if a.snapshot != "" {
+		a.record.ResponseBody = a.snapshot
+		a.record.ResponseSource = "cpa_final_snapshot"
+	} else {
+		a.record.ResponseBody, parsed = FinalResponse(a.response.String())
+		a.record.ResponseSource = "cpa_response"
+	}
 	if !parsed {
 		addWarning(&a.record, "流式最终结果未能解析，未保存中间事件")
 	}
@@ -522,9 +534,6 @@ func (e *Engine) Complete(c wire.Completion) error {
 	if r.KeyID == "" {
 		addWarning(r, "宿主尚未提供 usage 中的 API key 信息")
 	}
-	if e.cfg.LogsDir != "" {
-		r.UpstreamState = "pending"
-	}
 	if err := e.persist(a); err != nil {
 		e.error(err)
 		if errors.Is(err, ErrConversationTooLarge) {
@@ -543,15 +552,6 @@ func (e *Engine) Complete(c wire.Completion) error {
 		return nil // an older concurrent turn did not replace the latest head
 	}
 	e.images.enqueue(r.ID)
-	if e.cfg.LogsDir != "" {
-		if len(e.jobs) < 4096 {
-			e.jobs[r.ID] = &logJob{trace: r.TraceID, started: r.StartedAt, deadline: time.Now().Add(30 * time.Second)}
-		} else {
-			r.UpstreamState = "unavailable"
-			r.UpstreamError = "日志补全队列已满"
-			e.error(e.store.Save(r))
-		}
-	}
 	return nil
 }
 func (e *Engine) markFinished(id string) {
@@ -605,18 +605,10 @@ func (e *Engine) maintain() {
 					delete(e.active, id)
 				}
 			}
-			jobs := make(map[string]*logJob, len(e.jobs))
-			for id, j := range e.jobs {
-				jobs[id] = j
-			}
 			if ticks%60 == 0 {
 				e.error(e.store.Prune(e.cfg.RetentionDays, e.cfg.MaxRecords))
 			}
 			e.mu.Unlock()
-			// Reading large CPA log files must not hold the capture lock.
-			for id, j := range jobs {
-				e.enrich(id, j)
-			}
 			e.store.requestMaintenance()
 		}
 	}
@@ -624,7 +616,7 @@ func (e *Engine) maintain() {
 func (e *Engine) Status() map[string]any {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	status := map[string]any{"refresh_interval_seconds": e.store.RefreshInterval(e.cfg.RefreshIntervalSeconds), "active": len(e.active), "pending_logs": len(e.jobs), "unmatched_usage": len(e.pendingUsage), "dropped_requests": e.dropped, "memory_bytes": e.used, "last_error": e.lastError, "logs_enabled": e.cfg.LogsDir != "", "db_path": e.cfg.DBPath, "retention_days": e.cfg.RetentionDays, "max_body_bytes": e.cfg.MaxBodyBytes, "capture_scope": "model executions reaching CPA request interceptors"}
+	status := map[string]any{"refresh_interval_seconds": e.store.RefreshInterval(e.cfg.RefreshIntervalSeconds), "active": len(e.active), "unmatched_usage": len(e.pendingUsage), "dropped_requests": e.dropped, "memory_bytes": e.used, "last_error": e.lastError, "db_path": e.cfg.DBPath, "retention_days": e.cfg.RetentionDays, "max_body_bytes": e.cfg.MaxBodyBytes, "capture_scope": "model executions reaching CPA request interceptors"}
 	for key, value := range e.store.storageQuick() {
 		status[key] = value
 	}

@@ -122,7 +122,6 @@
               <col class="col-state" />
               <col class="col-timing" />
               <col class="col-tokens" />
-              <col class="col-upstream" />
               <col />
               <col />
             </colgroup>
@@ -134,7 +133,6 @@
                 <th>状态</th>
                 <th>首 token / 总耗时</th>
                 <th>Token / 缓存命中</th>
-                <th>服务商侧结果</th>
                 <th>最新用户提示词</th>
                 <th>模型最新响应</th>
               </tr>
@@ -161,7 +159,7 @@
       <p class="footnote">
         采集范围：进入 CPA
         请求拦截器的模型执行。提示词与模型回答由回调直接记录；
-        服务商转换前结果可选通过 request-log 补全。未知指标显示为 —。
+        优先保存完整结束快照，无需开启 request-log。未知指标显示为 —。
       </p>
     </main>
     <dialog id="login">
@@ -231,7 +229,6 @@
         <button data-tab="conversation" class="selected" role="tab">
           对话回放</button
         ><button data-tab="request" role="tab">原请求</button
-        ><button data-tab="upstream" role="tab">服务商侧结果</button
         ><button data-tab="response" role="tab">模型最终结果</button
         ><button data-tab="metadata" role="tab">元数据</button>
       </div>

@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gen2brain/vpx/webp"
 	"github.com/txsdx/cpa-plugin-request-recorder/internal/wire"
@@ -34,7 +35,7 @@ func TestWebPPreviewIsLossyBoundedAndOriginalDownloadIsUnchanged(t *testing.T) {
 	r := recordWithImage("preview", source)
 	check(t, e.store.Save(r))
 	e.images.enqueue(r.ID)
-	assets := awaitAssets(t, e.store, r.ID)
+	assets := awaitAssetsWithin(t, e.store, r.ID, 45*time.Second)
 	asset := assets[0]
 	e.images.cfg.PreviewMaxDimension = 600
 	query := url.Values{"record_id": {r.ID}, "id": {asset.ID}, "variant": {"preview"}}

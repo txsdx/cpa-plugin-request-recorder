@@ -15,7 +15,6 @@ type Summary struct {
 	ConversationStartedAt time.Time    `json:"conversation_started_at"`
 	ConversationTurns     int          `json:"conversation_turns"`
 	LatestPrompt          string       `json:"latest_prompt"`
-	LatestResponseSource  string       `json:"latest_response_source,omitempty"`
 	LatestResponse        string       `json:"latest_response"`
 	ID                    string       `json:"id"`
 	TraceID               string       `json:"trace_id"`
@@ -44,26 +43,20 @@ type Summary struct {
 	FirstChunkMS          *float64     `json:"first_chunk_ms"`
 	Tokens                *wire.Tokens `json:"tokens"`
 	CacheRatio            *float64     `json:"cache_ratio"`
-	UpstreamState         string       `json:"upstream_state"`
 	Warnings              []string     `json:"warnings"`
 }
 type Record struct {
 	ConversationHistory string `json:"conversation_history"`
 	Summary
-	UpstreamAttempt   int            `json:"upstream_attempt"`
-	Images            []ImageAsset   `json:"images,omitempty"`
-	UsageAttempts     []UsageAttempt `json:"usage_attempts,omitempty"`
-	RequestBody       string         `json:"request_body"`
-	RequestSource     string         `json:"request_source"`
-	InterceptedBody   string         `json:"intercepted_body"`
-	RequestHeaders    http.Header    `json:"request_headers"`
-	ResponseHeaders   http.Header    `json:"response_headers"`
-	ResponseBody      string         `json:"response_body"`
-	ResponseSource    string         `json:"response_source"`
-	UpstreamRequests  string         `json:"upstream_requests"`
-	UpstreamResponses string         `json:"upstream_responses"`
-	Error             string         `json:"error"`
-	UpstreamError     string         `json:"upstream_error"`
+	Images          []ImageAsset   `json:"images,omitempty"`
+	UsageAttempts   []UsageAttempt `json:"usage_attempts,omitempty"`
+	RequestBody     string         `json:"request_body"`
+	RequestSource   string         `json:"request_source"`
+	RequestHeaders  http.Header    `json:"request_headers"`
+	ResponseHeaders http.Header    `json:"response_headers"`
+	ResponseBody    string         `json:"response_body"`
+	ResponseSource  string         `json:"response_source"`
+	Error           string         `json:"error"`
 }
 type UsageAttempt struct {
 	ID               string      `json:"id"`

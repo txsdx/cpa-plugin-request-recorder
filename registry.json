@@ -4,7 +4,7 @@
     {
       "id": "request-recorder",
       "name": "CPA Request Recorder · 请求记录",
-      "description": "每个 API 用户的会话仅保留最新完整历史，在 CPAMC 中回放文字、思考、工具与图片；在线使用 WebP 预览，下载保留原图。需要 CPA plugin schema >= 6；模型回答无需 request-log，服务商转换前正文可选日志补全。",
+      "description": "只依据用户请求与 CPA 响应保留每个 API 用户最新完整会话，优先保存完整结束快照，无需请求日志；回放文字、思考、工具与图片，WebP 在线预览并下载原图。需要 CPA plugin schema >= 6。",
       "author": "txsdx",
       "repository": "https://github.com/txsdx/cpa-plugin-request-recorder",
       "homepage": "https://github.com/txsdx/cpa-plugin-request-recorder#readme",

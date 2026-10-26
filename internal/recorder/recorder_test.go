@@ -3,7 +3,6 @@ package recorder
 import (
 	"encoding/json"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -107,7 +106,7 @@ func TestBareJSONStreamCallbacksMergeWithoutRequestLogs(t *testing.T) {
 	check(t, e.Complete(wire.Completion{RequestID: "bare", Outcome: "succeeded"}))
 	r, err := e.Get("bare")
 	check(t, err)
-	if e.cfg.LogsDir != "" || r.LatestResponseSource != "cpa_response" || !strings.HasPrefix(r.LatestResponse, "0,1,2,") || strings.Contains(r.ResponseBody, "data:") || !strings.Contains(r.ResponseBody, "159,") {
+	if !strings.HasPrefix(r.LatestResponse, "0,1,2,") || strings.Contains(r.ResponseBody, "data:") || !strings.Contains(r.ResponseBody, "159,") {
 		t.Fatalf("bare JSON was not assembled: %+v %s", r.Summary, r.ResponseBody)
 	}
 	if len(conversationMessages(r)) != 2 || !strings.Contains(r.ConversationHistory, "159,") {
@@ -193,38 +192,6 @@ func TestManagementResourceDoesNotExposeData(t *testing.T) {
 	}
 }
 
-const logFixture = "=== REQUEST INFO ===\nURL: /v1/chat/completions\n\n=== HEADERS ===\nAuthorization: [MASKED]\n\n=== REQUEST BODY ===\n{\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}]}\n\n=== API REQUEST 1 ===\nUpstream URL: http://upstream\n\nHeaders:\n\nBody:\n{\"model\":\"real\"}\n\n=== API RESPONSE 1 ===\nTimestamp: test\nStatus: 200\n\nBody:\n{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"hello upstream\"}}]}\n\n=== RESPONSE ===\nStatus: 200\n\n{\"downstream\":true}\n"
-
-func TestLogCorrelationAndSourceSeparation(t *testing.T) {
-	e := testEngine(t)
-	dir := t.TempDir()
-	e.cfg.LogsDir = dir
-	check(t, e.Request(wire.Request{RequestID: "l", TraceID: "abcd1234", Body: []byte("hook-request")}, false))
-	check(t, e.Response(wire.Response{RequestID: "l", Body: []byte("downstream")}, false))
-	check(t, e.Complete(wire.Completion{RequestID: "l", Outcome: "succeeded"}))
-	path := filepath.Join(dir, "v1-chat-completions-2026-10-26T123456-abcd1234.log")
-	check(t, os.WriteFile(path, []byte(logFixture), 0600))
-	j := e.jobs["l"]
-	for i := 0; i < 3; i++ {
-		e.enrich("l", j)
-	}
-	r, err := e.Get("l")
-	check(t, err)
-	if r.UpstreamState != "log_captured" || r.ResponseBody != "downstream" || r.RequestSource != "cpa_request_log" || !strings.Contains(r.UpstreamResponses, "hello upstream") {
-		t.Fatalf("%+v", r)
-	}
-	if got := UpstreamConversation(r); len(got) != 1 || got[0].Content != "hello upstream" {
-		t.Fatal(got)
-	}
-	check(t, os.WriteFile(filepath.Join(dir, "other-abcd1234.log"), []byte(logFixture), 0600))
-	if _, err := findLog(dir, "abcd1234", time.Now().Add(-time.Minute)); err == nil {
-		t.Fatal("ambiguous logs linked")
-	}
-	if _, err := findLog(dir, "../../bad", time.Now()); err == nil {
-		t.Fatal("unsafe trace accepted")
-	}
-}
-
 func TestDistinctReporterIDsJoinByTraceWithoutDuplicateRetryBilling(t *testing.T) {
 	for _, late := range []bool{false, true} {
 		t.Run(fmt.Sprint(late), func(t *testing.T) {
@@ -266,16 +233,6 @@ func TestAmbiguousTraceUsageIsNotAssigned(t *testing.T) {
 		t.Fatal("missing pending usage")
 	}
 }
-func TestFullTraceUsesTrailingEightCharacters(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "v1-chat-completions-2026-10-26T123456-6543210a.log")
-	check(t, os.WriteFile(path, []byte(logFixture), 0600))
-	found, err := findLog(dir, "01234567-abcd-1234-abcd-98766543210a", time.Now().Add(-time.Minute))
-	check(t, err)
-	if found != path {
-		t.Fatal(found)
-	}
-}
 func TestFailedAndRejectedRequestsHaveTerminalRecords(t *testing.T) {
 	for _, outcome := range []string{"failed", "rejected"} {
 		t.Run(outcome, func(t *testing.T) {
@@ -288,22 +245,6 @@ func TestFailedAndRejectedRequestsHaveTerminalRecords(t *testing.T) {
 				t.Fatal(r)
 			}
 		})
-	}
-}
-func TestPendingLogJobsResumeAfterRestart(t *testing.T) {
-	c := DefaultConfig()
-	c.DBPath = filepath.Join(t.TempDir(), "test.db")
-	c.LogsDir = t.TempDir()
-	e, err := New(c)
-	check(t, err)
-	check(t, e.Request(wire.Request{RequestID: "r", TraceID: "abcd1234"}, false))
-	check(t, e.Complete(wire.Completion{RequestID: "r", Outcome: "succeeded"}))
-	check(t, e.Close())
-	e, err = New(c)
-	check(t, err)
-	defer e.Close()
-	if len(e.jobs) != 1 {
-		t.Fatal("pending job not restored")
 	}
 }
 func TestOverloadDoesNotCaptureOnlyStreamSuffixAsComplete(t *testing.T) {

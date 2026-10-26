@@ -14,6 +14,7 @@ import subprocess
 import tempfile
 import threading
 import time
+import uuid
 import urllib.error
 import urllib.request
 
@@ -27,6 +28,17 @@ class Mock(BaseHTTPRequestHandler):
     def log_message(self, *_): pass
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+        if self.path.endswith('/responses'):
+            self.send_response(200);self.send_header('Content-Type','text/event-stream');self.end_headers()
+            response_id='resp_'+uuid.uuid4().hex
+            text='完整最终快照：'+''.join(f'{i},' for i in range(160))
+            message={'type':'message','id':'msg_'+response_id,'role':'assistant','content':[{'type':'output_text','text':text}]}
+            events=[{'type':'response.created','response':{'id':response_id,'model':'responses-model','output':[]}}]
+            events += [{'type':'response.output_text.delta','output_index':0,'content_index':0,'delta':f'{i},'} for i in range(160)]
+            events += [{'type':'response.output_text.done','output_index':0,'content_index':0,'text':text},{'type':'response.output_item.done','output_index':0,'item':message},{'type':'response.completed','response':{'id':response_id,'object':'response','model':'responses-model','status':'completed','output':[message],'usage':{'input_tokens':100,'output_tokens':160,'total_tokens':260,'input_tokens_details':{'cached_tokens':50}}}}]
+            for event in events:
+                self.wfile.write(('event: '+event['type']+'\ndata: '+json.dumps(event)+'\n\n').encode());self.wfile.flush()
+            return
         self.send_response(200)
         stream = body.get('stream', False)
         self.send_header('Content-Type', 'text/event-stream' if stream else 'application/json')
@@ -47,13 +59,11 @@ def free_port():
 def run():
     binary = os.environ.get('CPA_BIN')
     if not binary: raise SystemExit('Set CPA_BIN to a schema >= 6 CPA binary')
-    logs_enabled = os.environ.get('RECORDER_TEST_LOGS', '1') != '0'
     mock = ThreadingHTTPServer(('127.0.0.1',0), Mock)
     threading.Thread(target=mock.serve_forever,daemon=True).start()
     directory = os.environ.get('INTEGRATION_DIR')
     work = Path(directory) if directory else Path(tempfile.mkdtemp(prefix='recorder-integration-'))
     work.mkdir(parents=True, exist_ok=True)
-    (work/'logs').mkdir(exist_ok=True)
     port = free_port()
     plugins = work/'plugins'; plugins.mkdir(exist_ok=True)
     shutil.copyfile(ROOT/'dist/request-recorder.so', plugins/'request-recorder.so')
@@ -65,7 +75,7 @@ remote-management:
   secret-key: "{MANAGEMENT}"
   disable-control-panel: true
 api-keys: ["{KEY}"]
-request-log: {str(logs_enabled).lower()}
+request-log: false
 usage-statistics-enabled: true
 request-retry: 0
 openai-compatibility:
@@ -76,6 +86,12 @@ openai-compatibility:
     models:
       - name: "mock-model"
         alias: "mock-model"
+codex-api-key:
+  - api-key: "mock-codex-test-key"
+    base-url: "http://127.0.0.1:{mock.server_port}/v1"
+    models:
+      - name: "responses-model"
+        alias: "responses-model"
 plugins:
   enabled: true
   dir: "{plugins}"
@@ -83,7 +99,6 @@ plugins:
     request-recorder:
       enabled: true
       db_path: "{work / 'recorder.db'}"
-      logs_dir: "{work / 'logs' if logs_enabled else ''}"
 '''
     (work/'config.yaml').write_text(config)
     def request(path, data=None, key=MANAGEMENT, session=None):
@@ -111,18 +126,18 @@ plugins:
         else: raise AssertionError('unauthenticated record access')
         for stream in [False,True]:
             body={'model':'mock-model','stream':stream,'messages':[{'role':'user','content':[{'type':'text','text':'图里是什么？'},{'type':'image_url','image_url':{'url':IMAGE}}]}]}
-            data=request('/v1/chat/completions',body,key=KEY,session='stream' if stream else 'json')
+            if stream:
+                body={'model':'responses-model','stream':True,'input':[{'role':'user','content':[{'type':'input_text','text':'图里是什么？'},{'type':'input_image','image_url':IMAGE}]}]}
+            data=request('/v1/responses' if stream else '/v1/chat/completions',body,key=KEY,session='stream' if stream else 'json')
             if stream: assert b'159,' in data
         records=None
         for _ in range(150):
             records=json.loads(request('/v0/management/plugins/request-recorder/records'))
-            if records['total']==2 and all((not logs_enabled or x['upstream_state']=='log_captured') and x['key_id'] and x['latest_response'] for x in records['items']):break
+            if records['total']==2 and all(x['key_id'] and x['latest_response'] for x in records['items']):break
             time.sleep(.2)
         assert records['total']==2,records
         for item in records['items']:
             assert item['outcome']=='succeeded',item
-            assert (item['upstream_state']=='log_captured') == logs_enabled,item
-            assert item['latest_response_source']==('provider_response' if logs_enabled else 'cpa_response'),item
             assert item['key_id']==hashlib.sha256(KEY.encode()).hexdigest(),item
             d=json.loads(request('/v0/management/plugins/request-recorder/record?id='+item['id']))
             assert IMAGE in d['record']['request_body']
@@ -143,27 +158,24 @@ plugins:
             except urllib.error.HTTPError as e: assert e.code in (401,403)
             else: raise AssertionError('public image access allowed')
             assert (work/'recorder-images'/(image['hash']+'.png')).read_bytes()==base64.b64decode(PNG)
-            if logs_enabled:
-                assert IMAGE in d['record']['upstream_requests']
-                assert d['record']['upstream_responses'] and not d['record']['upstream_responses'].startswith('data: ')
-            else:
-                assert not d['record']['upstream_responses'] and not d['upstream_conversation']
             assert '图里是什么？' in d['record']['latest_prompt']
             assert d['record']['latest_response']
             if item['stream']:
                 assert '159,' in d['record']['response_body'] and not d['record']['response_body'].startswith('data: ')
                 assert item['tokens']['TotalTokens']==260,item
+                assert d['record']['response_source']=='cpa_final_snapshot',d['record']['response_source']
+                assert json.loads(d['record']['response_body'])['object']=='response'
+                assert '完整最终快照：' in d['record']['latest_response']
             else:
                 assert any(m.get('images') for m in d['conversation'] if m['source']=='request')
-                if logs_enabled: assert any(m.get('images') for m in d['upstream_conversation']),d['upstream_conversation']
         # An incremental turn in the same explicit client session must replace
         # its row while retaining the prior text and image history.
         stream_head=next(item for item in records['items'] if item['stream'])
-        request('/v1/chat/completions',{'model':'mock-model','stream':True,'messages':[{'role':'user','content':'继续解释这张图'}]},key=KEY,session='stream')
+        request('/v1/responses',{'model':'responses-model','stream':True,'input':'继续解释这张图'},key=KEY,session='stream')
         for _ in range(150):
             updated=json.loads(request('/v0/management/plugins/request-recorder/records'))
             newest=next((item for item in updated['items'] if item['id']==stream_head['id']),{})
-            if updated['total']==2 and newest.get('conversation_turns')==2 and (not logs_enabled or newest['upstream_state']=='log_captured'): break
+            if updated['total']==2 and newest.get('conversation_turns')==2: break
             time.sleep(.2)
         assert updated['total']==2 and newest['request_id']!=stream_head['request_id'] and newest['conversation_turns']==2,updated
         history=json.loads(request('/v0/management/plugins/request-recorder/record?id='+stream_head['id']))
@@ -173,6 +185,9 @@ plugins:
         assert any(message.get('images') for message in history['conversation'])
         status=json.loads(request('/v0/management/plugins/request-recorder/status'))
         assert status['refresh_interval_seconds']==1 and status['max_database_bytes']==1073741824
+        assert 'logs_enabled' not in status and 'pending_logs' not in status
+        assert all(not name.startswith('upstream_') for name in history['record'])
+        assert 'upstream_conversation' not in history
         storage=json.loads(request('/v0/management/plugins/request-recorder/storage'))
         assert storage['body_chunks']>0 and storage['body_stored_bytes']>0
         key_id=hashlib.sha256(KEY.encode()).hexdigest()
@@ -186,7 +201,7 @@ plugins:
         assert alias['ok']
         page=json.loads(request('/v0/management/plugins/request-recorder/records?alias='+urllib.parse.quote('集成测试')))
         assert page['total']==2
-        print(json.dumps({'result':'PASS','records':2,'stream_chunks':160,'checks':['native CPA loading','public GUI registration','management authentication','nonstream and SSE capture','usage join','optional upstream log enrichment' if logs_enabled else 'model result without request-log','latest conversation replaces prior snapshot','input and output images','authenticated local image archive','image file persistence','compressed WebP preview and original download','CPAMC alias sync authentication','alias filtering'],'workdir':str(work),'port':port},ensure_ascii=False))
+        print(json.dumps({'result':'PASS','records':2,'stream_chunks':160,'checks':['native CPA loading','public GUI registration','management authentication','nonstream and SSE capture','usage join','native Responses complete final snapshot without logs','latest conversation replaces prior snapshot','input and output images','authenticated local image archive','image file persistence','compressed WebP preview and original download','CPAMC alias sync authentication','alias filtering'],'workdir':str(work),'port':port},ensure_ascii=False))
         if os.environ.get('KEEP_RUNNING')=='1':
             print('KEEP_RUNNING: press Ctrl+C to stop',flush=True)
             while proc.poll() is None: time.sleep(1)
