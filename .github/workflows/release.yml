@@ -117,7 +117,7 @@ jobs:
           CGO_ENABLED=1 go build -trimpath -buildmode=c-shared \
             -ldflags "-X github.com/txsdx/cpa-plugin-request-recorder/internal/recorder.Version=$VERSION" \
             -o "dist/request-recorder.${{ matrix.os == 'windows' && 'dll' || 'dylib' }}" ./cmd/plugin
-          python3 scripts/package.py "$VERSION" "$GOOS" "$GOARCH" "${{ matrix.os == 'windows' && 'dll' || 'dylib' }}"
+          python scripts/package.py "$VERSION" "$GOOS" "$GOARCH" "${{ matrix.os == 'windows' && 'dll' || 'dylib' }}"
       - uses: actions/upload-artifact@v4
         with:
           name: plugin-${{ matrix.os }}-${{ matrix.arch }}
