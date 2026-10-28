@@ -63,19 +63,24 @@ type active struct {
 	size     int
 }
 type Engine struct {
-	images       *imageArchive
-	mu           sync.Mutex
-	store        *Store
-	cfg          Config
-	active       map[string]*active
-	pendingUsage map[string]wire.Usage
-	skipped      map[string]time.Time
-	finished     map[string]time.Time
-	used         int
-	dropped      uint64
-	lastError    string
-	stop         chan struct{}
-	done         chan struct{}
+	images            *imageArchive
+	mu                sync.Mutex
+	store             *Store
+	cfg               Config
+	active            map[string]*active
+	pendingUsage      map[string]pendingUsage
+	recentUsage       map[string]*usageExecution
+	recentUsageTraces map[string]map[string]*usageExecution
+	usageOwners       map[string]string
+	discardedUsage    uint64
+	lastUsageDrop     time.Time
+	skipped           map[string]time.Time
+	finished          map[string]time.Time
+	used              int
+	dropped           uint64
+	lastError         string
+	stop              chan struct{}
+	done              chan struct{}
 }
 
 func New(c Config) (*Engine, error) {
@@ -89,7 +94,7 @@ func New(c Config) (*Engine, error) {
 	}
 	s.limit = c.MaxDatabaseBytes
 	s.historyLimit = c.MaxBodyBytes
-	e := &Engine{store: s, cfg: c, active: map[string]*active{}, pendingUsage: map[string]wire.Usage{}, skipped: map[string]time.Time{}, finished: map[string]time.Time{}, stop: make(chan struct{}), done: make(chan struct{})}
+	e := &Engine{store: s, cfg: c, active: map[string]*active{}, pendingUsage: map[string]pendingUsage{}, recentUsage: map[string]*usageExecution{}, recentUsageTraces: map[string]map[string]*usageExecution{}, usageOwners: map[string]string{}, skipped: map[string]time.Time{}, finished: map[string]time.Time{}, stop: make(chan struct{}), done: make(chan struct{})}
 	if err = s.Prune(c.RetentionDays, c.MaxRecords); err != nil {
 		s.Close()
 		return nil, err
@@ -178,7 +183,9 @@ func (e *Engine) Request(req wire.Request, after bool) error {
 		r.RequestBody = e.capture(a, req.Body)
 		r.RequestHeaders = safeHeaders(req.Headers)
 	}
-	r.TraceID = req.TraceID
+	if req.TraceID != "" {
+		r.TraceID = req.TraceID
+	}
 	r.Format = req.SourceFormat
 	r.Stream = req.Stream
 	r.RequestedModel = req.RequestedModel
@@ -327,7 +334,7 @@ func applyUsage(r *Record, u wire.Usage) {
 			addWarning(r, "usage 尝试数超过 1024，后续用量未聚合")
 		}
 	}
-	if u.TraceID != "" {
+	if r.TraceID == "" {
 		r.TraceID = u.TraceID
 	}
 	r.Provider = u.Provider
@@ -395,86 +402,6 @@ func applyUsage(r *Record, u wire.Usage) {
 	}
 }
 
-// UsageReporter IDs and lifecycle execution IDs are distinct in current CPA.
-// Join exact IDs first, then an unambiguous full trace (+ model if necessary).
-func (e *Engine) Usage(u wire.Usage) error {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	matched, err := e.joinUsage(u)
-	if err != nil {
-		return err
-	}
-	if !matched {
-		if len(e.pendingUsage) < 4096 {
-			e.pendingUsage[u.RequestID] = u
-		} else {
-			e.lastError = "usage correlation queue full"
-		}
-	}
-	return nil
-}
-func (e *Engine) joinUsage(u wire.Usage) (bool, error) {
-	if a := e.active[u.RequestID]; a != nil {
-		applyUsage(&a.record, u)
-		return true, nil
-	}
-	if r, err := e.store.Get(u.RequestID); err == nil {
-		if r.RequestID != "" && r.RequestID != u.RequestID {
-			return false, nil
-		}
-		applyUsage(r, u)
-		return true, e.store.Save(r)
-	} else if !errors.Is(err, ErrNotFound) {
-		return false, err
-	}
-	candidates := map[string]Summary{}
-	for id, a := range e.active {
-		if u.TraceID != "" && a.record.TraceID == u.TraceID {
-			candidates[id] = a.record.Summary
-		}
-	}
-	stored, err := e.store.ByTrace(u.TraceID)
-	if err != nil {
-		return false, err
-	}
-	for _, r := range stored {
-		candidates[r.ID] = r
-	}
-	if len(candidates) > 1 {
-		for id, r := range candidates {
-			if r.Model != u.Model && r.RequestedModel != u.Model {
-				delete(candidates, id)
-			}
-		}
-	}
-	if len(candidates) != 1 {
-		return false, nil
-	}
-	for id := range candidates {
-		if a := e.active[id]; a != nil {
-			applyUsage(&a.record, u)
-			return true, nil
-		}
-		r, err := e.store.Get(id)
-		if err != nil {
-			return false, err
-		}
-		applyUsage(r, u)
-		return true, e.store.Save(r)
-	}
-	return false, nil
-}
-func (e *Engine) drainUsage() {
-	for id, u := range e.pendingUsage {
-		matched, err := e.joinUsage(u)
-		if err != nil {
-			e.error(err)
-		}
-		if matched {
-			delete(e.pendingUsage, id)
-		}
-	}
-}
 func (e *Engine) persist(a *active) error {
 	parsed := true
 	if a.snapshot != "" {
@@ -551,6 +478,7 @@ func (e *Engine) Complete(c wire.Completion) error {
 	if r.RequestID != c.RequestID {
 		return nil // an older concurrent turn did not replace the latest head
 	}
+	e.rememberUsage(r)
 	e.images.enqueue(r.ID)
 	return nil
 }
@@ -586,12 +514,7 @@ func (e *Engine) maintain() {
 				}
 			}
 			e.drainUsage()
-			for id, u := range e.pendingUsage {
-				if !u.RequestedAt.IsZero() && time.Since(u.RequestedAt) > 5*time.Minute {
-					delete(e.pendingUsage, id)
-					e.lastError = "usage 无法唯一关联到请求，未写入其他请求"
-				}
-			}
+			e.expireUsage(time.Now())
 			for id, a := range e.active {
 				if time.Since(a.record.StartedAt) > 30*time.Minute {
 					a.record.Outcome = "incomplete"
@@ -618,6 +541,13 @@ func (e *Engine) Status() map[string]any {
 	defer e.mu.Unlock()
 	settings := e.store.Settings(e.cfg.RefreshIntervalSeconds)
 	status := map[string]any{"refresh_interval_seconds": settings.RefreshIntervalSeconds, "ignore_rejected": settings.IgnoreRejected, "active": len(e.active), "unmatched_usage": len(e.pendingUsage), "dropped_requests": e.dropped, "memory_bytes": e.used, "last_error": e.lastError, "db_path": e.cfg.DBPath, "retention_days": e.cfg.RetentionDays, "max_body_bytes": e.cfg.MaxBodyBytes, "capture_scope": "model executions reaching CPA request interceptors"}
+	status["discarded_usage"] = e.discardedUsage
+	if !e.lastUsageDrop.IsZero() {
+		status["last_usage_warning_at"] = e.lastUsageDrop
+		if time.Since(e.lastUsageDrop) < pendingUsageTTL {
+			status["usage_warning"] = "有用量统计无法确认归属，相关 token / 首 token 数据可能不完整。"
+		}
+	}
 	for key, value := range e.store.storageQuick() {
 		status[key] = value
 	}

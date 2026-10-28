@@ -365,7 +365,8 @@ async function refresh() {
       el(
         "div",
         "",
-        `采集中 ${status.active} · 丢弃 ${status.dropped_requests}`,
+        `采集中 ${status.active} · 丢弃 ${status.dropped_requests}` +
+          (status.unmatched_usage ? ` · 用量待关联 ${status.unmatched_usage}` : ""),
       ),
     );
     if (status.database_file_bytes != null)
@@ -385,6 +386,7 @@ async function refresh() {
         `已因容量淘汰 ${fmt(status.capacity_evicted_records)} 条最旧记录。`,
       );
     if (status.last_error) warnings.push("采集错误：" + status.last_error);
+    if (status.usage_warning) warnings.push("用量统计提示：" + status.usage_warning);
     if (status.dropped_requests)
       warnings.push(
         "部分请求因采集或会话容量限制未更新，请查看采集错误和容量设置。",

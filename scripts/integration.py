@@ -197,6 +197,7 @@ plugins:
         except urllib.error.HTTPError as e: assert e.code in (401,403)
         else: raise AssertionError('unauthenticated Markdown export allowed')
         status=json.loads(request('/v0/management/plugins/request-recorder/status'))
+        assert status['unmatched_usage']==0 and status['discarded_usage']==0,status
         assert status['refresh_interval_seconds']==1 and status['max_database_bytes']==1073741824
         assert 'logs_enabled' not in status and 'pending_logs' not in status
         assert all(not name.startswith('upstream_') for name in history['record'])

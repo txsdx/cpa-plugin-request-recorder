@@ -29,6 +29,7 @@ flowchart LR
 - before-auth 抓取当时的正文；响应 hook 的 OriginalRequest 存在时采用宿主原始请求副本。after-auth 仅补充身份和路由元数据，不另存执行中间请求正文。
 - header-init stream 事件用来缓存原请求与头部，不把它视为首分片；payload chunk 按顺序拼接。结束、失败、拒绝和取消以 terminal callback 为准。
 - usage 回调可以先于或后于 completion，且 UsageReporter RequestID 可能不同。使用完整 TraceID 唯一匹配；同 trace 下多个同模型执行时不猜测归属。
+- 已确认的 reporter 归属可复用。内存保留最近 10 分钟的执行标识和 token 计数，上限 2048 次执行 / 8192 个 reporter；同 trace 内的请求起止时间、已知调用者与模型别名只能排除候选。旧轮次迟到的用量仅更新会话累计 token，不替换最新请求。待关联队列按到达时间等待 5 分钟后过期，关联提示单独计数与过期，数据库错误保留。
 - usage_attempts 按 reporter ID 去重，token 聚合包括重试尝试。缓存读取比例：OpenAI / Gemini 为 cache-read / input；原生 Claude 为 cache-read / (uncached input + cache read + cache creation)。原始计数同时保留。总耗时取 lifecycle 开始/结束，TTFT 取宿主 usage 数据，首分片耗时单独显示。
 - 记录显示为“已结束”不等于“响应采集完整”。中断保留已有正文，超限保留部分并附提示。
 
