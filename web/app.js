@@ -512,7 +512,7 @@ function renderDetailHeader() {
     count ? value + (count < turns ? "（部分）" : "") : "—";
   $("detail-title").textContent = r.response_model || r.model || "请求详情";
   $("detail-sub").textContent =
-    `会话总耗时 ${metric(duration(totals.duration_ms), totals.duration_requests)} · 总消耗 token ${metric(fmt(totals.total_tokens), totals.token_requests)}`;
+    `会话总耗时 ${metric(duration(totals.duration_ms), totals.duration_requests)} · 总消耗 token ${metric(fmt(totals.total_tokens), totals.token_requests)} · 最新 ${date(r.started_at)}`;
   $("detail-sub").title = "模型请求耗时累计，不含用户停顿。";
   if (totals.duration_requests < turns || totals.token_requests < turns)
     $("detail-sub").title +=

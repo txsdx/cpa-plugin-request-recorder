@@ -425,6 +425,15 @@ h2 {
 .detail-head h2 {
   margin: 6px 0;
 }
+.detail-heading {
+  min-width: 0;
+}
+.detail-title-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0 16px;
+}
 .detail-head .mono {
   font-size: 11px;
   overflow-wrap: anywhere;

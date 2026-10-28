@@ -31,15 +31,15 @@ CLIProxyAPI 的原生插件：在模型请求结束后更新完整会话，在 *
 
 Linux 包在 Debian 12 / glibc 环境原生编译，匹配所检查 CPA Dockerfile 的系统基线；Alpine / musl 和 Windows ARM64 不包含在这五种发布目标中。Docker 部署应按 **容器内部** 的 OS / 架构选择，不是按浏览器或宿主桌面系统选择。
 
-以 Linux amd64 `v0.7.0` 为例：
+以 Linux amd64 `v0.7.1` 为例：
 
-1. 下载 `request-recorder_0.7.0_linux_amd64.zip` 和 `checksums.txt`，放在同一目录。
+1. 下载 `request-recorder_0.7.1_linux_amd64.zip` 和 `checksums.txt`，放在同一目录。
 2. 校验并解压到 CPA 的插件目录：
 
    ```bash
    sha256sum --ignore-missing --check checksums.txt
    mkdir -p /path/to/CLIProxyAPI/plugins/linux/amd64
-   unzip request-recorder_0.7.0_linux_amd64.zip -d /path/to/CLIProxyAPI/plugins/linux/amd64
+   unzip request-recorder_0.7.1_linux_amd64.zip -d /path/to/CLIProxyAPI/plugins/linux/amd64
    ```
 
 3. 合并下面的插件配置，设置数据库持久化，然后重启 CPA。无需配置日志目录。
@@ -93,7 +93,7 @@ plugins:
     - "https://raw.githubusercontent.com/txsdx/cpa-plugin-request-recorder/main/registry.json"
 ```
 
-刷新商店，选择 `CPA Request Recorder · 请求记录`，点击安装。以后刷新检查更新，再点击更新即可。CPA 从仓库的**最新正式 Release**解析版本，自动选择 OS / CPU 对应 zip，校验 `checksums.txt`，并写入带版本的库文件（例如 `plugins/linux/amd64/request-recorder-v0.7.0.so`）。不要为了匹配版本再手动重命名 Release 的 zip 或库。
+刷新商店，选择 `CPA Request Recorder · 请求记录`，点击安装。以后刷新检查更新，再点击更新即可。CPA 从仓库的**最新正式 Release**解析版本，自动选择 OS / CPU 对应 zip，校验 `checksums.txt`，并写入带版本的库文件（例如 `plugins/linux/amd64/request-recorder-v0.7.1.so`）。不要为了匹配版本再手动重命名 Release 的 zip 或库。
 
 安装源解决的是下载安装和版本更新。仍需按本文配置数据库持久化；GUI 通过 CPAMC 插件资源打开。更新是否热加载或要求重启由 CPA 版本及运行平台决定。预发布版本不会被 GitHub latest 接口当作正式更新推送。
 
@@ -216,7 +216,7 @@ plugins:
 
 新一轮原子覆盖同一条会话，旧请求行、旧分支正文和无引用块随之删除；保留当前分支完整消息，旧思考和工具结果即使客户端不重发也尽可能保留。重新生成覆盖对应回答及之后的旧分支。按请求开始时间保护较新的轮次，延迟完成的旧请求不能覆盖新快照。独立会话和不同 API key 分开保存；稳定会话 ID 与最新请求 ID 分别为 `id` / `request_id`。
 
-每条会话的列表耗时、token、状态、原请求与原响应对应**最新一次模型请求**。详情标题下方显示**会话总耗时 / 总消耗 token**：按插件已记录轮次累计模型请求耗时与宿主 token，包含重生成、重试用量，不计入用户停顿时间；重复保存与当前轮次的 usage 更正不会重复累计。`conversation_turns` 是观察到的更新次数，包含重新生成。旧会话只保存了最后一轮指标，缺失的早期累计统计无法补回，会显示“部分”，悬停可查看已统计轮数。
+每条会话的列表耗时、token、状态、原请求与原响应对应**最新一次模型请求**。详情的模型名称旁显示**会话总耗时 / 总消耗 token / 最新请求时间**：按插件已记录轮次累计模型请求耗时与宿主 token，包含重生成、重试用量，不计入用户停顿时间；重复保存与当前轮次的 usage 更正不会重复累计。`conversation_turns` 是观察到的更新次数，包含重新生成。旧会话只保存了最后一轮指标，缺失的早期累计统计无法补回，会显示“部分”，悬停可查看已统计轮数。
 
 聊天历史保存在数据库，不另外落一份逐请求历史。没有明确会话标识且上下文被客户端裁剪时，不能保证归并；两个没有 ID 且上下文完全相同的聊天也无法可靠区分，建议客户端传会话 ID。
 
@@ -271,7 +271,7 @@ GUI 的 **存储占用** 区分活动文件、空闲页、正文合计、去重�
 
 列表区域宽度为视口的 90%，最后两列为**最新用户提示词**与**模型最新响应**，共用剩余宽度。元数据列使用紧凑宽度，预览最多显示六行；点击条目查看全文。列表保留 8 列，移除服务商侧结果列，为提示词和回答提供更多宽度。打开的会话在新轮次到达时随列表刷新。窄屏在列表内部横向滚动。自动刷新跳过正在进行的刷新，不重复创建请求；数据未变化时不重建条目。
 
-会话详情填满当前视口，标题下方只显示会话累计耗时和 token。**对话回放** 页签旁提供上一条 / 下一条用户提示词按钮，跳转到对应提问并高亮；同一用户连续的文字、图片和附件块合为一个定位点。按钮随阅读位置更新，切换其他页签后隐藏；会话及图片状态刷新保留当前阅读位置。
+会话详情填满当前视口，模型名称与会话累计耗时、token、最新请求时间同行显示，窄屏自动换行。**对话回放** 页签旁提供上一条 / 下一条用户提示词按钮，跳转到对应提问并高亮；同一用户连续的文字、图片和附件块合为一个定位点。按钮随阅读位置更新，切换其他页签后隐藏；会话及图片状态刷新保留当前阅读位置。
 
 ### 导出完整会话到 Markdown
 
