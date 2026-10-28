@@ -616,7 +616,8 @@ func (e *Engine) maintain() {
 func (e *Engine) Status() map[string]any {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	status := map[string]any{"refresh_interval_seconds": e.store.RefreshInterval(e.cfg.RefreshIntervalSeconds), "active": len(e.active), "unmatched_usage": len(e.pendingUsage), "dropped_requests": e.dropped, "memory_bytes": e.used, "last_error": e.lastError, "db_path": e.cfg.DBPath, "retention_days": e.cfg.RetentionDays, "max_body_bytes": e.cfg.MaxBodyBytes, "capture_scope": "model executions reaching CPA request interceptors"}
+	settings := e.store.Settings(e.cfg.RefreshIntervalSeconds)
+	status := map[string]any{"refresh_interval_seconds": settings.RefreshIntervalSeconds, "ignore_rejected": settings.IgnoreRejected, "active": len(e.active), "unmatched_usage": len(e.pendingUsage), "dropped_requests": e.dropped, "memory_bytes": e.used, "last_error": e.lastError, "db_path": e.cfg.DBPath, "retention_days": e.cfg.RetentionDays, "max_body_bytes": e.cfg.MaxBodyBytes, "capture_scope": "model executions reaching CPA request interceptors"}
 	for key, value := range e.store.storageQuick() {
 		status[key] = value
 	}

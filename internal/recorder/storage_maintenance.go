@@ -389,22 +389,3 @@ func copyDatabaseFile(source, dest string) error {
 	}
 	return closeErr
 }
-
-func (s *Store) RefreshInterval(fallback int) int {
-	value := fallback
-	_ = s.view(func(tx *bolt.Tx) error {
-		if raw := tx.Bucket(storageMeta).Get([]byte("refresh_interval")); len(raw) == 8 {
-			value = int(binary.BigEndian.Uint64(raw))
-		}
-		return nil
-	})
-	return value
-}
-func (s *Store) SetRefreshInterval(seconds int) error {
-	if seconds < 1 || seconds > 3600 {
-		return errors.New("refresh interval must be 1..3600 seconds")
-	}
-	var value [8]byte
-	binary.BigEndian.PutUint64(value[:], uint64(seconds))
-	return s.update(4096, func(tx *bolt.Tx) error { return tx.Bucket(storageMeta).Put([]byte("refresh_interval"), value[:]) })
-}

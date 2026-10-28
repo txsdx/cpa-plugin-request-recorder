@@ -31,15 +31,15 @@ CLIProxyAPI 的原生插件：在模型请求结束后更新完整会话，在 *
 
 Linux 包在 Debian 12 / glibc 环境原生编译，匹配所检查 CPA Dockerfile 的系统基线；Alpine / musl 和 Windows ARM64 不包含在这五种发布目标中。Docker 部署应按 **容器内部** 的 OS / 架构选择，不是按浏览器或宿主桌面系统选择。
 
-以 Linux amd64 `v0.6.0` 为例：
+以 Linux amd64 `v0.6.1` 为例：
 
-1. 下载 `request-recorder_0.6.0_linux_amd64.zip` 和 `checksums.txt`，放在同一目录。
+1. 下载 `request-recorder_0.6.1_linux_amd64.zip` 和 `checksums.txt`，放在同一目录。
 2. 校验并解压到 CPA 的插件目录：
 
    ```bash
    sha256sum --ignore-missing --check checksums.txt
    mkdir -p /path/to/CLIProxyAPI/plugins/linux/amd64
-   unzip request-recorder_0.6.0_linux_amd64.zip -d /path/to/CLIProxyAPI/plugins/linux/amd64
+   unzip request-recorder_0.6.1_linux_amd64.zip -d /path/to/CLIProxyAPI/plugins/linux/amd64
    ```
 
 3. 合并下面的插件配置，设置数据库持久化，然后重启 CPA。无需配置日志目录。
@@ -93,7 +93,7 @@ plugins:
     - "https://raw.githubusercontent.com/txsdx/cpa-plugin-request-recorder/main/registry.json"
 ```
 
-刷新商店，选择 `CPA Request Recorder · 请求记录`，点击安装。以后刷新检查更新，再点击更新即可。CPA 从仓库的**最新正式 Release**解析版本，自动选择 OS / CPU 对应 zip，校验 `checksums.txt`，并写入带版本的库文件（例如 `plugins/linux/amd64/request-recorder-v0.6.0.so`）。不要为了匹配版本再手动重命名 Release 的 zip 或库。
+刷新商店，选择 `CPA Request Recorder · 请求记录`，点击安装。以后刷新检查更新，再点击更新即可。CPA 从仓库的**最新正式 Release**解析版本，自动选择 OS / CPU 对应 zip，校验 `checksums.txt`，并写入带版本的库文件（例如 `plugins/linux/amd64/request-recorder-v0.6.1.so`）。不要为了匹配版本再手动重命名 Release 的 zip 或库。
 
 安装源解决的是下载安装和版本更新。仍需按本文配置数据库持久化；GUI 通过 CPAMC 插件资源打开。更新是否热加载或要求重启由 CPA 版本及运行平台决定。预发布版本不会被 GitHub latest 接口当作正式更新推送。
 
@@ -265,6 +265,8 @@ GUI 的 **存储占用** 区分活动文件、空闲页、正文合计、去重�
 
 顶部控制按钮置于左侧下方，避开 CPAMC 右上角浮层；手动刷新保留在“管理 key 别名”所在的列表工具栏。自动刷新默认开启，每秒更新；工具栏可以修改 1–3600 秒的间隔，设置保存在插件数据库。关闭自动刷新时仍可手动刷新。后台采集不受这些 UI 设置影响。
 
+自动刷新旁的 **忽略已拒绝条目** 默认不勾选。勾选后按 `rejected` 状态在服务端分页前过滤，总数与页码同步更新；失败、已中断等其他状态仍可查看。取消勾选恢复显示已拒绝记录。该偏好保存在插件数据库，刷新页面、换浏览器或重启 CPA 后都会恢复。
+
 列表区域宽度为视口的 90%，最后两列为**最新用户提示词**与**模型最新响应**，共用剩余宽度。元数据列使用紧凑宽度，预览最多显示六行；点击条目查看全文。列表保留 8 列，移除服务商侧结果列，为提示词和回答提供更多宽度。打开的会话在新轮次到达时随列表刷新。窄屏在列表内部横向滚动。自动刷新跳过正在进行的刷新，不重复创建请求；数据未变化时不重建条目。
 
 ### 导出完整会话到 Markdown
@@ -310,7 +312,7 @@ GUI 的 **存储占用** 区分活动文件、空闲页、正文合计、去重�
 | `GET /record?id=…` | 最新会话原文与完整对话；GUI 初次打开用 `view=chat` 省略大正文，原文页签 / 导出再加载 |
 | `GET /export/markdown?id=…` | 下载完整会话 Markdown，内嵌可用原图；超出 max_body_bytes 返回 413，图片读取繁忙返回 429 |
 | `GET /storage` | 活动文件、空闲页、容量淘汰、压缩去重后正文与整理状态 |
-| `POST /settings` | `{"refresh_interval_seconds":1}`，设置列表刷新间隔 |
+| `POST /settings` | `{"refresh_interval_seconds":1,"ignore_rejected":true}`，可独立更新刷新间隔或忽略已拒绝条目的偏好 |
 | `GET /status` | 采集、用量、存储错误，以及图片目录 / 配额 / 待处理数 |
 | `GET /images?record_id=…` | 图片归档状态；轮询不重新读取巨大正文 |
 | `GET /image?record_id=…&id=…&variant=preview` | 返回该会话原图的 WebP 压缩预览，同样需要管理鉴权 |
@@ -319,7 +321,7 @@ GUI 的 **存储占用** 区分活动文件、空闲页、正文合计、去重�
 | `POST /aliases/sync` | 自动备注快照 `{"aliases":{"<SHA-256 key_id>":"CPAMC 备注"}}`；原子替换自动备注，保留手动别名 |
 | `POST /aliases` | `{"key_id":"sha256…","alias":"开发机"}` 或 `{"key":"临时提交原 key","alias":"开发机"}`；空别名删除映射 |
 
-列表参数：`q`、`key_id`、`alias`、`model`、`provider`、`outcome`、`session`、`reasoning`、`from` / `to`（RFC3339）、`min_duration`（毫秒）、`offset`、`limit`（默认 50，上限 200）。结果为 `{items,total,offset,limit}`。`q` 搜索摘要字段，不扫描完整正文。
+列表参数：`q`、`key_id`、`alias`、`model`、`provider`、`outcome`、`session`、`reasoning`、`from` / `to`（RFC3339）、`min_duration`（毫秒）、`ignore_rejected`（true / false，省略时使用已保存偏好）、`offset`、`limit`（默认 50，上限 200）。结果为 `{items,total,offset,limit}`。`q` 搜索摘要字段，不扫描完整正文。
 
 ## 开发与验证
 

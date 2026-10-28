@@ -266,6 +266,7 @@ type Filter struct {
 	From, To                                                          time.Time
 	MinDuration                                                       float64
 	Offset, Limit                                                     int
+	IgnoreRejected                                                    bool
 }
 type Page struct {
 	Items  []Summary `json:"items"`
@@ -290,6 +291,9 @@ func (s *Store) List(f Filter) (Page, error) {
 				return err
 			}
 			r.KeyAlias = resolvedAlias(tx, r.KeyID)
+			if f.IgnoreRejected && r.Outcome == "rejected" {
+				continue
+			}
 			if !f.From.IsZero() && r.StartedAt.Before(f.From) {
 				continue
 			}

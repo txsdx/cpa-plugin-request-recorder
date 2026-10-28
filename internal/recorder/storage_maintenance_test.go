@@ -41,9 +41,10 @@ func TestCapacityEvictsOldestAndShrinksActiveDatabase(t *testing.T) {
 	if _, err := s.Get("29"); err != nil {
 		t.Fatal("latest record lost", err)
 	}
-	check(t, s.SetRefreshInterval(2))
+	interval, ignoreRejected := 2, true
+	check(t, s.SetSettings(settingsUpdate{Interval: &interval, IgnoreRejected: &ignoreRejected}))
 	check(t, s.compactOnline())
-	if s.RefreshInterval(1) != 2 {
+	if settings := s.Settings(1); settings.RefreshIntervalSeconds != 2 || !settings.IgnoreRejected {
 		t.Fatal("compaction lost settings")
 	}
 	t.Logf("Capacity fixture: active DB %d -> %d bytes, retained=%d, evicted=%d", before.File, after.File, after.Records, after.Evicted)

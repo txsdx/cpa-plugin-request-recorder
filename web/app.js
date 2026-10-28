@@ -336,6 +336,8 @@ async function refresh() {
     refreshSeconds = status.refresh_interval_seconds || 1;
     if (document.activeElement !== $("refresh-interval"))
       $("refresh-interval").value = refreshSeconds;
+    if (!$("ignore-rejected").disabled)
+      $("ignore-rejected").checked = Boolean(status.ignore_rejected);
     renderRows(page.items);
     const currentHead =
       detail && page.items.find((r) => r.id === detail.record.id);
@@ -1161,6 +1163,34 @@ function scheduleRefresh() {
   }, refreshSeconds * 1000);
 }
 $("auto").onchange = scheduleRefresh;
+$("ignore-rejected").onchange = async () => {
+  const checkbox = $("ignore-rejected"),
+    checked = checkbox.checked,
+    revision = authGeneration;
+  if (!managementKey) {
+    checkbox.checked = !checked;
+    $("login").showModal();
+    return;
+  }
+  checkbox.disabled = true;
+  generation++;
+  try {
+    await api("/settings", {
+      method: "POST",
+      body: JSON.stringify({ ignore_rejected: checked }),
+    });
+    if (revision !== authGeneration) return;
+    offset = 0;
+    await refresh().catch(() => {});
+  } catch (error) {
+    if (revision === authGeneration) {
+      checkbox.checked = !checked;
+      notice(error.message);
+    }
+  } finally {
+    checkbox.disabled = false;
+  }
+};
 $("refresh-interval").onchange = async () => {
   const seconds = Number($("refresh-interval").value);
   if (!Number.isInteger(seconds) || seconds < 1 || seconds > 3600) {

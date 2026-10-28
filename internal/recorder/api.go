@@ -17,7 +17,7 @@ const APIBase = "/v0/management/plugins/" + PluginID
 const ResourceBase = "/v0/resource/plugins/" + PluginID
 
 // Version is injected from the validated release tag by the build.
-var Version = "0.6.0"
+var Version = "0.6.1"
 
 func Registration() map[string]any {
 	return map[string]any{"schema_version": 6, "metadata": map[string]any{
@@ -99,8 +99,14 @@ func (e *Engine) Management(req wire.ManagementRequest, web fs.FS) wire.Manageme
 			return result(200, e.Status())
 		case "/records":
 			q := req.Query
-			f := Filter{Query: q.Get("q"), KeyID: q.Get("key_id"), Alias: q.Get("alias"), Model: q.Get("model"), Provider: q.Get("provider"), Outcome: q.Get("outcome"), Session: q.Get("session"), Reasoning: q.Get("reasoning")}
+			f := Filter{Query: q.Get("q"), KeyID: q.Get("key_id"), Alias: q.Get("alias"), Model: q.Get("model"), Provider: q.Get("provider"), Outcome: q.Get("outcome"), Session: q.Get("session"), Reasoning: q.Get("reasoning"), IgnoreRejected: e.store.Settings(e.cfg.RefreshIntervalSeconds).IgnoreRejected}
 			var err error
+			if q.Has("ignore_rejected") {
+				f.IgnoreRejected, err = strconv.ParseBool(q.Get("ignore_rejected"))
+				if err != nil {
+					return result(400, map[string]string{"error": "ignore_rejected must be true or false"})
+				}
+			}
 			if q.Get("from") != "" {
 				f.From, err = time.Parse(time.RFC3339, q.Get("from"))
 				if err != nil {
@@ -174,16 +180,17 @@ func (e *Engine) Management(req wire.ManagementRequest, web fs.FS) wire.Manageme
 		}
 	}
 	if req.Method == "POST" && path == "/settings" {
-		var body struct {
-			Interval int `json:"refresh_interval_seconds"`
+		var body settingsUpdate
+		if len(req.Body) > 1024 || json.Unmarshal(req.Body, &body) != nil {
+			return result(400, map[string]string{"error": "invalid settings"})
 		}
-		if len(req.Body) > 1024 || json.Unmarshal(req.Body, &body) != nil || body.Interval < 1 || body.Interval > 3600 {
-			return result(400, map[string]string{"error": "refresh_interval_seconds must be 1..3600"})
+		if err := body.validate(); err != nil {
+			return result(400, map[string]string{"error": err.Error()})
 		}
-		if err := e.store.SetRefreshInterval(body.Interval); err != nil {
+		if err := e.store.SetSettings(body); err != nil {
 			return result(500, map[string]string{"error": "settings write failed"})
 		}
-		return result(200, map[string]int{"refresh_interval_seconds": body.Interval})
+		return result(200, e.store.Settings(e.cfg.RefreshIntervalSeconds))
 	}
 	if req.Method == "POST" && path == "/images/retry" {
 		id := req.Query.Get("record_id")
