@@ -1,7 +1,7 @@
 GO ?= go
 GOOS ?= $(shell $(GO) env GOOS)
 GOARCH ?= $(shell $(GO) env GOARCH)
-VERSION ?= 0.6.1
+VERSION ?= 0.7.0
 EXT = so
 ifeq ($(GOOS),darwin)
 EXT = dylib

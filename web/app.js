@@ -13,7 +13,11 @@ let managementKey = "",
   refreshRequests = 0,
   refreshTimer = 0,
   refreshSeconds = 1,
-  lastRowsSignature = "";
+  lastRowsSignature = "",
+  promptTargets = [],
+  promptCursor = -1,
+  promptScrollTop = -1,
+  promptScrollFrame = 0;
 const outcomeNames = {
   succeeded: "成功",
   failed: "失败",
@@ -294,7 +298,9 @@ function clearAuthenticatedView() {
   lastRowsSignature = "";
   $("rows").replaceChildren();
   $("detail-body").replaceChildren();
-  $("detail-metrics").replaceChildren();
+  $("detail-sub").replaceChildren();
+  promptTargets = [];
+  $("prompt-nav").hidden = true;
   $("empty").hidden = false;
   $("connection").textContent = "未连接";
   $("health").textContent = "等待连接";
@@ -347,6 +353,10 @@ async function refresh() {
       currentHead.request_id !== detail.record.request_id
     )
       await openDetail(currentHead.id, true);
+    else if (currentHead) {
+      Object.assign(detail.record, currentHead);
+      renderDetailHeader();
+    }
     $("total").textContent = fmt(total);
     $("connection").textContent = "● 已连接";
     $("connection").className = "";
@@ -485,6 +495,29 @@ function renderRows(items) {
   }
   renderKeyChoices();
 }
+function renderDetailHeader() {
+  if (!detail) return;
+  const r = detail.record,
+    totals = r.conversation_totals || {
+      duration_ms: r.duration_ms,
+      total_tokens: r.tokens?.TotalTokens,
+      duration_requests:
+        r.duration_ms > 0 || (r.completed_at && !r.completed_at.startsWith("0001-"))
+          ? 1
+          : 0,
+      token_requests: r.tokens ? 1 : 0,
+    },
+    turns = r.conversation_turns || 1;
+  const metric = (value, count) =>
+    count ? value + (count < turns ? "（部分）" : "") : "—";
+  $("detail-title").textContent = r.response_model || r.model || "请求详情";
+  $("detail-sub").textContent =
+    `会话总耗时 ${metric(duration(totals.duration_ms), totals.duration_requests)} · 总消耗 token ${metric(fmt(totals.total_tokens), totals.token_requests)}`;
+  $("detail-sub").title = "模型请求耗时累计，不含用户停顿。";
+  if (totals.duration_requests < turns || totals.token_requests < turns)
+    $("detail-sub").title +=
+      `耗时已统计 ${totals.duration_requests}/${turns} 轮，token 已统计 ${totals.token_requests}/${turns} 轮；未记录的历史统计无法补回。`;
+}
 async function openDetail(id, preserveTab = false) {
   const authRevision = authGeneration,
     sequence = ++detailGeneration;
@@ -501,33 +534,15 @@ async function openDetail(id, preserveTab = false) {
       !managementKey
     )
       return;
-    if (!detail || detail.record.id !== data.record.id) clearDetailImages();
+    const sameRecord = detail?.record.id === data.record.id;
+    if (!sameRecord) clearDetailImages();
     detail = data;
     if (!preserveTab) activeTab = "conversation";
-    $("detail-title").textContent =
-      data.record.response_model || data.record.model || "请求详情";
-    $("detail-sub").textContent =
-      `${data.record.id} · ${data.record.conversation_turns || 1} 次模型请求 · 最新 ${date(data.record.started_at)}`;
-    const r = data.record;
-    const vals = [
-      [
-        "请求者",
-        r.key_alias || callerKeysById.get(r.key_id)?.key || r.key_hint || "—",
-      ],
-      ["首 token", duration(r.ttft_ms)],
-      ["完整耗时", duration(r.duration_ms)],
-      ["Token", fmt(r.tokens?.TotalTokens)],
-      ["缓存命中", pct(r.cache_ratio)],
-    ];
-    $("detail-metrics").replaceChildren(
-      ...vals.map(([k, v]) => {
-        const d = el("div");
-        d.append(el("small", "", k), document.createTextNode(v));
-        return d;
-      }),
-    );
-    renderDetail();
+    renderDetailHeader();
+    renderDetail(preserveTab && sameRecord);
     if (!$("detail").open) $("detail").showModal();
+    promptScrollTop = -1;
+    trackPromptPosition();
   } catch (e) {
     notice(e.message);
   }
@@ -689,7 +704,7 @@ function scheduleImagePoll() {
           if (status === "pending") pending = true;
         }
       }
-      if (changed) renderDetail();
+      if (changed) renderDetail(true);
       if (pending || state.pending) scheduleImagePoll();
     } catch (error) {
       notice("无法查询 CPA 图片归档状态：" + error.message);
@@ -746,7 +761,7 @@ function imageView(image) {
           });
           image.status = "pending";
           image.error = "";
-          renderDetail();
+          renderDetail(true);
           scheduleImagePoll();
         } catch (error) {
           notice(error.message);
@@ -871,10 +886,62 @@ function bubble(m) {
   box.append(label, body);
   return box;
 }
-function renderDetail() {
+function updatePromptControls() {
+  $("prompt-prev").disabled = promptCursor <= 0;
+  $("prompt-next").disabled = promptCursor + 1 >= promptTargets.length;
+  $("prompt-position").textContent = promptTargets.length
+    ? `${promptCursor < 0 ? "—" : promptCursor + 1} / ${promptTargets.length}`
+    : "无用户提示词";
+  promptTargets.forEach((target, i) =>
+    target.classList.toggle("prompt-current", i === promptCursor),
+  );
+}
+function trackPromptPosition() {
+  if ($("prompt-nav").hidden || !$("detail").open) return;
+  const body = $("detail-body");
+  if (Math.abs(body.scrollTop - promptScrollTop) < 1) return;
+  promptScrollTop = body.scrollTop;
+  const top = body.getBoundingClientRect().top + 24;
+  promptCursor = promptTargets.findLastIndex(
+    (target) => target.getBoundingClientRect().top <= top,
+  );
+  if (
+    body.scrollHeight > body.clientHeight &&
+    body.scrollTop + body.clientHeight >= body.scrollHeight - 1
+  )
+    promptCursor = promptTargets.length - 1;
+  updatePromptControls();
+}
+function jumpPrompt(direction) {
+  const index = promptCursor + direction,
+    target = promptTargets[index];
+  if (!target) return;
+  const body = $("detail-body"),
+    top =
+      body.scrollTop + target.getBoundingClientRect().top -
+      body.getBoundingClientRect().top - 16;
+  body.scrollTo({ top, behavior: "auto" });
+  target.focus({ preventScroll: true });
+  promptCursor = index;
+  promptScrollTop = body.scrollTop;
+  updatePromptControls();
+}
+$("prompt-prev").onclick = () => jumpPrompt(-1);
+$("prompt-next").onclick = () => jumpPrompt(1);
+$("detail-body").onscroll = () => {
+  if (promptScrollFrame) return;
+  promptScrollFrame = requestAnimationFrame(() => {
+    promptScrollFrame = 0;
+    trackPromptPosition();
+  });
+};
+function renderDetail(preserveScroll = false) {
   if (!detail) return;
   const r = detail.record,
-    body = $("detail-body");
+    body = $("detail-body"),
+    scrollTop = preserveScroll ? body.scrollTop : 0;
+  promptTargets = [];
+  $("prompt-nav").hidden = activeTab !== "conversation";
   imageObserver?.disconnect();
   body.replaceChildren();
   document.querySelectorAll("[data-tab]").forEach((b) => {
@@ -894,7 +961,18 @@ function renderDetail() {
     );
     if (!detail.conversation?.length)
       body.append(el("p", "muted", "无可还原的对话内容，请查看原文。"));
-    for (const m of detail.conversation || []) body.append(bubble(m));
+    let previousUser = false;
+    for (const m of detail.conversation || []) {
+      const node = bubble(m),
+        user = m.role === "user" && !["tool_result", "notice"].includes(m.kind);
+      if (user && !previousUser) {
+        node.dataset.userPrompt = promptTargets.length;
+        node.tabIndex = -1;
+        promptTargets.push(node);
+      }
+      previousUser = user;
+      body.append(node);
+    }
     if (r.error) body.append(el("div", "warnings", r.error));
   } else if (activeTab === "request") {
     body.append(
@@ -957,7 +1035,10 @@ function renderDetail() {
     };
     body.prepend(alias);
   }
-  body.scrollTop = 0;
+  body.scrollTop = scrollTop;
+  promptCursor = -1;
+  promptScrollTop = -1;
+  trackPromptPosition();
 }
 $("storage-open").onclick = async () => {
   if (!managementKey) {

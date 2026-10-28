@@ -227,13 +227,19 @@
           ><button data-close="detail" aria-label="关闭详情">✕</button>
         </div>
       </div>
-      <div id="detail-metrics" class="detail-metrics"></div>
-      <div class="tabs" role="tablist">
-        <button data-tab="conversation" class="selected" role="tab">
-          对话回放</button
-        ><button data-tab="request" role="tab">原请求</button
-        ><button data-tab="response" role="tab">模型最终结果</button
-        ><button data-tab="metadata" role="tab">元数据</button>
+      <div class="detail-toolbar">
+        <div class="tabs" role="tablist">
+          <button data-tab="conversation" class="selected" role="tab">
+            对话回放</button
+          ><button data-tab="request" role="tab">原请求</button
+          ><button data-tab="response" role="tab">模型最终结果</button
+          ><button data-tab="metadata" role="tab">元数据</button>
+        </div>
+        <nav id="prompt-nav" class="prompt-nav" aria-label="用户提示词导航" hidden>
+          <button id="prompt-prev" type="button">↑ 上一条用户提示词</button>
+          <span id="prompt-position" class="muted mono" aria-live="polite"></span>
+          <button id="prompt-next" type="button">↓ 下一条用户提示词</button>
+        </nav>
       </div>
       <div id="detail-body" class="detail-body"></div>
     </dialog>

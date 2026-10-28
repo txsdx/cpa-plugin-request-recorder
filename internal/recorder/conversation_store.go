@@ -313,6 +313,7 @@ func (s *Store) prepareConversation(r *Record) ([]string, error) {
 	if len(r.ConversationHistory) > s.historyLimit {
 		return nil, ErrConversationTooLarge
 	}
+	updateConversationTotals(r, previous)
 	if scope != "" {
 		for _, message := range conversationMessages(r) {
 			if message.ResponseID != "" {

@@ -183,6 +183,9 @@ plugins:
         assert any('图里是什么？' in message.get('content','') for message in history['conversation'])
         assert sum('159,' in message.get('content','') for message in history['conversation'])==2
         assert any(message.get('images') for message in history['conversation'])
+        totals=history['record']['conversation_totals']
+        assert totals['total_tokens']==520 and totals['token_requests']==2,totals
+        assert totals['duration_requests']==2 and totals['duration_ms']>=history['record']['duration_ms'],totals
         markdown_path='/v0/management/plugins/request-recorder/export/markdown?id='+stream_head['id']
         markdown=request(markdown_path).decode('utf-8')
         assert markdown.startswith('# 完整会话记录')
