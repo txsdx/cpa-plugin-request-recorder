@@ -16,7 +16,7 @@ const assert = require('node:assert/strict');
     await page.locator('#management-key').fill(key);
     await page.locator('#login-form button[type=submit]').click();
     await page.locator('#login').waitFor({state: 'hidden'});
-    await page.locator('#rows tr').filter({hasText: 'responses-model'}).click();
+    await page.locator('#rows tr').filter({hasText: '继续解释这张图'}).click();
     await page.locator('#detail').waitFor({state: 'visible'});
     const bounds = await page.locator('#detail').boundingBox();
     assert.deepEqual(bounds, {x: 0, y: 0, width: 1000, height: 500});

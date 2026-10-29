@@ -41,6 +41,7 @@ const hash = text => createHash('sha256').update(text).digest('hex');
     await page.goto(base + '/panel-test');
     const frame = page.frameLocator('#plugin');
     await frame.locator('#rows tr').first().waitFor();
+    const fixtureCount=await frame.locator('#total').textContent();
     assert.equal(await frame.locator('#login').evaluate(dialog => dialog.open), false);
     assert((await frame.locator('#rows').textContent()).includes('CPAMC 自动备注'));
     assert(synced.length > 0);
@@ -49,7 +50,7 @@ const hash = text => createHash('sha256').update(text).digest('hex');
     await frame.locator('#filters input[name=alias]').fill('CPAMC 自动备注');
     await frame.locator('#filters button[type=submit]').click();
     await frame.locator('#rows tr').first().waitFor();
-    assert.equal(await frame.locator('#total').textContent(), '2');
+    assert.equal(await frame.locator('#total').textContent(), fixtureCount);
     await frame.locator('#filters button[type=reset]').click();
     // Actual cross-document storage event: edit the parent, observe iframe sync.
     await page.evaluate(({base, nameID}) => localStorage.setItem('api-key-names:v1:' + base, window.encodePanel({[nameID]: 'CPAMC 已修改备注'})), {base, nameID});

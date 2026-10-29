@@ -101,10 +101,11 @@ plugins:
       db_path: "{work / 'recorder.db'}"
 '''
     (work/'config.yaml').write_text(config)
-    def request(path, data=None, key=MANAGEMENT, session=None):
+    def request(path, data=None, key=MANAGEMENT, session=None, extra_headers=None):
         headers={'Content-Type':'application/json'}
         if key is not None: headers['Authorization']='Bearer '+key
         if session: headers['X-Session-ID']=session
+        if extra_headers: headers.update(extra_headers)
         req=urllib.request.Request(f'http://127.0.0.1:{port}'+path, data=None if data is None else json.dumps(data).encode(),headers=headers)
         # Local HTTP checks must not go through the remote egress proxy.
         return urllib.request.build_opener(urllib.request.ProxyHandler({})).open(req,timeout=15).read()
@@ -215,7 +216,41 @@ plugins:
         assert alias['ok']
         page=json.loads(request('/v0/management/plugins/request-recorder/records?alias='+urllib.parse.quote('集成测试')))
         assert page['total']==2
-        print(json.dumps({'result':'PASS','records':2,'stream_chunks':160,'checks':['native CPA loading','public GUI registration','management authentication','nonstream and SSE capture','usage join','native Responses complete final snapshot without logs','latest conversation replaces prior snapshot','authenticated full-history Markdown export with original images','input and output images','authenticated local image archive','image file persistence','compressed WebP preview and original download','CPAMC alias sync authentication','alias filtering'],'workdir':str(work),'port':port},ensure_ascii=False))
+        # These identities are the ones Billing displays from UsageRecord.
+        # Do not require full context resends or infer a session from a model.
+        cases=[
+            ('cherry',{},'cherry-agent:0123456789abcdef0123456789abcdef','pck:cherry-agent:0123456789abcdef0123456789abcdef'),
+            ('codex-parent',{'Session-Id':'integration-parent'},None,'codex:integration-parent'),
+            ('codex-child',{'Session-Id':'integration-parent','Thread-Id':'integration-child'},None,'codex:integration-child')
+        ]
+        heads=set()
+        for label, headers, cache_key, billing_id in cases:
+            stable=None
+            for turn in [1,2]:
+                body={'model':'responses-model','stream':True,'input':label+' question '+str(turn)}
+                if cache_key: body['prompt_cache_key']=cache_key
+                request('/v1/responses',body,key=KEY,extra_headers=headers)
+                for _ in range(150):
+                    selected=json.loads(request('/v0/management/plugins/request-recorder/records?session='+urllib.parse.quote(billing_id)))
+                    if selected['total']==1 and selected['items'][0]['conversation_turns']==turn and selected['items'][0].get('tokens',{}).get('TotalTokens')==260:break
+                    time.sleep(.1)
+                assert selected['total']==1, (label,selected)
+                head=selected['items'][0]
+                assert head['conversation_turns']==turn,(label,head)
+                if stable is None: stable=head['id']
+                assert head['id']==stable,(label,head)
+            detail=json.loads(request('/v0/management/plugins/request-recorder/record?id='+stable))
+            assert head['conversation_totals']['total_tokens']==520,(label,head)
+            for turn in [1,2]:
+                assert any(m.get('content')==label+' question '+str(turn) for m in detail['conversation']),label
+            assert len(detail['conversation'])==4,(label,len(detail['conversation']))
+            assert stable not in heads, 'parent, child and Cherry sessions must remain separate'
+            heads.add(stable)
+        final_records=json.loads(request('/v0/management/plugins/request-recorder/records'))
+        assert final_records['total']==5,final_records
+        status=json.loads(request('/v0/management/plugins/request-recorder/status'))
+        assert status['unmatched_usage']==0 and status['discarded_usage']==0,status
+        print(json.dumps({'result':'PASS','records':5,'stream_chunks':160,'checks':['native CPA loading','public GUI registration','management authentication','nonstream and SSE capture','usage join','native Responses complete final snapshot without logs','latest conversation replaces prior snapshot','authenticated full-history Markdown export with original images','input and output images','authenticated local image archive','image file persistence','compressed WebP preview and original download','CPAMC alias sync authentication','alias filtering','Cherry Agent prompt_cache_key incremental history','Codex Session-Id incremental history','Codex child Thread-Id isolation','Billing and client session ID filtering'],'workdir':str(work),'port':port},ensure_ascii=False))
         if os.environ.get('KEEP_RUNNING')=='1':
             print('KEEP_RUNNING: press Ctrl+C to stop',flush=True)
             while proc.poll() is None: time.sleep(1)

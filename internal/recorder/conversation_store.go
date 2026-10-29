@@ -9,7 +9,6 @@ import (
 	"errors"
 	"hash"
 	"io"
-	"strings"
 
 	bolt "go.etcd.io/bbolt"
 )
@@ -25,27 +24,6 @@ func conversationMessages(r *Record) []Message {
 		return messages
 	}
 	return Conversation(r.RequestBody, r.ResponseBody)
-}
-
-// Use explicit client thread IDs, not the host's cache/routing/execution IDs.
-func clientConversationID(r *Record) string {
-	for _, name := range []string{"Session_id", "X-Session-ID", "X-Conversation-ID", "Conversation-ID", "X-Thread-ID", "Thread-ID"} {
-		if value := strings.TrimSpace(r.RequestHeaders.Get(name)); value != "" && len(value) <= 256 {
-			return "client:" + value
-		}
-	}
-	body := decode(r.RequestBody)
-	for _, candidate := range []map[string]any{body, obj(body["metadata"])} {
-		for _, name := range []string{"conversation_id", "thread_id", "session_id"} {
-			if value := str(candidate[name]); value != "" && len(value) <= 256 {
-				return "client:" + value
-			}
-		}
-	}
-	if value := str(obj(body["conversation"])["id"]); value != "" && len(value) <= 256 {
-		return "client:" + value
-	}
-	return ""
 }
 
 func writeConversationField(h hash.Hash, value string) {
@@ -99,48 +77,6 @@ func contextPoints(messages []Message) []contextPoint {
 }
 func contextKey(scope, kind, digest string) string { return scope + "\x00" + kind + ":" + digest }
 
-func mergeConversation(previous, input, output []Message, explicit bool) []Message {
-	var config []Message
-	strip := func(messages []Message) []Message {
-		result := []Message{}
-		for _, message := range messages {
-			if message.Role == "system" || message.Role == "developer" {
-				continue
-			}
-			result = append(result, message)
-		}
-		return result
-	}
-	for _, message := range input {
-		if message.Role == "system" || message.Role == "developer" {
-			config = append(config, message)
-		}
-	}
-	if len(config) == 0 {
-		for _, message := range previous {
-			if message.Role == "system" || message.Role == "developer" {
-				config = append(config, message)
-			}
-		}
-	}
-	previous, input = strip(previous), strip(input)
-	oldPoints, newPoints := contextPoints(previous), contextPoints(input)
-	shared := 0
-	for shared < len(oldPoints) && shared < len(newPoints) && oldPoints[shared].digest == newPoints[shared].digest {
-		shared++
-	}
-	merged := append([]Message{}, config...)
-	if shared == 0 {
-		if explicit {
-			merged = append(merged, previous...)
-		}
-		merged = append(merged, input...)
-	} else {
-		merged = append(merged, previous[:oldPoints[shared-1].end]...)
-		merged = append(merged, input[newPoints[shared-1].end:]...)
-	}
-	return append(merged, output...)
-}
 func contextConfiguration(r *Record) string {
 	h := sha256.New()
 	for _, message := range requestMessages(r.RequestBody) {
@@ -178,6 +114,7 @@ func (s *Store) prepareConversation(r *Record) ([]string, error) {
 	linked := false
 	points := contextPoints(input)
 	session := clientConversationID(r)
+	r.ClientSessionID = session
 	scope := r.KeyID
 	if r.CallerScope != "" {
 		scope = "caller:" + r.CallerScope
@@ -214,15 +151,17 @@ func (s *Store) prepareConversation(r *Record) ([]string, error) {
 				lookupErr = err
 				return false
 			}
+			if foundSession := clientConversationID(found); session != "" && foundSession != "" && foundSession != session {
+				return false
+			}
 			previous = found
 			return true
 		}
-		if previousResponseID != "" && lookup(contextKey(scope, "response", previousResponseID)) {
-			linked = true
+		if session != "" && lookup(contextKey(scope, "session", session)) {
 			return nil
 		}
-		if session != "" {
-			lookup(contextKey(scope, "session", session))
+		if previousResponseID != "" && lookup(contextKey(scope, "response", previousResponseID)) {
+			linked = true
 			return nil
 		}
 		if len(points) > 0 && lookup(contextKey(namespace, "input", points[len(points)-1].digest)) {
@@ -250,6 +189,10 @@ func (s *Store) prepareConversation(r *Record) ([]string, error) {
 		return aliases, err
 	}
 	if previous != nil {
+		if session == "" {
+			session = clientConversationID(previous)
+			r.ClientSessionID = session
+		}
 		r.ID = previous.ID
 		r.ConversationStartedAt = previous.ConversationStartedAt
 		if r.ConversationStartedAt.IsZero() {

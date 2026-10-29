@@ -31,6 +31,7 @@ type Summary struct {
 	CallerScope           string              `json:"caller_scope"`
 	UserAgent             string              `json:"user_agent"`
 	SessionID             string              `json:"session_id"`
+	ClientSessionID       string              `json:"client_session_id,omitempty"`
 	ParentSessionID       string              `json:"parent_session_id"`
 	Provider              string              `json:"provider"`
 	RequestedModel        string              `json:"requested_model"`

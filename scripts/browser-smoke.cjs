@@ -17,6 +17,7 @@ const assert = require('node:assert/strict');
   await page.goto(base+'/v0/resource/plugins/request-recorder/index.html');
   await page.locator('#login-open').click();await page.locator('#management-key').fill(key);await page.locator('#login-form button[type=submit]').click();
   await page.locator('#login').waitFor({state:'hidden'});await page.waitForFunction(()=>document.querySelectorAll('#rows tr').length>=2);
+  const fixtureCount=await page.locator('#rows tr').count();
   await page.locator('#storage-open').click();await page.locator('#storage-body').getByText('去重压缩后正文',{exact:true}).waitFor();assert((await page.locator('#storage-body').textContent()).includes('自动淘汰最旧记录'));await page.locator('[data-close=storage-view]').click();
   assert.equal(await page.locator('#auto').isChecked(),true);assert.equal(await page.locator('#refresh-interval').inputValue(),'1');assert.equal(await page.locator('.toolbar #refresh').count(),1);assert.equal(await page.locator('thead th').count(),8);const widthRatio=await page.locator('main').evaluate(el=>el.getBoundingClientRect().width/window.innerWidth);assert(widthRatio>0.89&&widthRatio<0.91);assert((await page.locator('#rows').textContent()).includes('图里是什么？'));
   const ignored=page.getByLabel('忽略已拒绝条目');
@@ -27,7 +28,7 @@ const assert = require('node:assert/strict');
   assert.equal((await savedSettings.json()).ignore_rejected,true);
   await page.reload();
   await page.locator('#login-open').click();await page.locator('#management-key').fill(key);await page.locator('#login-form button[type=submit]').click();
-  await page.locator('#login').waitFor({state:'hidden'});await page.waitForFunction(()=>document.querySelectorAll('#rows tr').length===2);
+  await page.locator('#login').waitFor({state:'hidden'});await page.waitForFunction(count=>document.querySelectorAll('#rows tr').length===count,fixtureCount);
   assert.equal(await ignored.isChecked(),true);
   assert.equal(await page.locator('#auto').isChecked(),true);
   assert.equal(await page.locator('#refresh-interval').inputValue(),'1');
@@ -39,8 +40,8 @@ const assert = require('node:assert/strict');
   await page.screenshot({path:process.env.RECORDER_SCREENSHOT_LIST||'/tmp/recorder-list.png',fullPage:true});
   await page.locator('#filters input[name=model]').fill('not-a-real-model');await page.locator('#filters button[type=submit]').click();await page.waitForFunction(()=>document.querySelectorAll('#rows tr').length===0);assert.equal(await page.locator('#total').textContent(),'0');
   await page.locator('#filters button[type=reset]').click();await page.waitForFunction(()=>document.querySelectorAll('#rows tr').length>=2);
-  await page.locator('#filters details summary').click();await page.locator('#filters input[name=key]').fill('sk-recorder-integration-client');await page.locator('#filters button[type=submit]').click();await page.waitForFunction(()=>document.querySelector('#total').textContent==='2');
-  await page.locator('#filters input[name=key]').fill('missing-client-key');await page.locator('#filters button[type=submit]').click();await page.waitForFunction(()=>document.querySelector('#total').textContent==='0');await page.locator('#filters button[type=reset]').click();await page.waitForFunction(()=>document.querySelectorAll('#rows tr').length===2);
+  await page.locator('#filters details summary').click();await page.locator('#filters input[name=key]').fill('sk-recorder-integration-client');await page.locator('#filters button[type=submit]').click();await page.waitForFunction(count=>document.querySelector('#total').textContent===String(count),fixtureCount);
+  await page.locator('#filters input[name=key]').fill('missing-client-key');await page.locator('#filters button[type=submit]').click();await page.waitForFunction(()=>document.querySelector('#total').textContent==='0');await page.locator('#filters button[type=reset]').click();await page.waitForFunction(count=>document.querySelectorAll('#rows tr').length===count,fixtureCount);
   // The nonstream fixture has input and output images. Open each record until found.
   const count=await page.locator('#rows tr').count();let found=false;
   for(let i=0;i<count;i++){

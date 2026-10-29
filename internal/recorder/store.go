@@ -300,7 +300,7 @@ func (s *Store) List(f Filter) (Page, error) {
 			if !f.To.IsZero() && r.StartedAt.After(f.To) {
 				continue
 			}
-			if f.KeyID != "" && r.KeyID != f.KeyID || f.Outcome != "" && r.Outcome != f.Outcome || f.Session != "" && r.SessionID != f.Session || r.DurationMS < f.MinDuration {
+			if f.KeyID != "" && r.KeyID != f.KeyID || f.Outcome != "" && r.Outcome != f.Outcome || f.Session != "" && !matchesConversationSession(r, f.Session) || r.DurationMS < f.MinDuration {
 				continue
 			}
 			match := true
@@ -310,7 +310,7 @@ func (s *Store) List(f Filter) (Page, error) {
 					break
 				}
 			}
-			if !match || !contains(strings.Join([]string{r.ID, r.TraceID, r.KeyAlias, r.KeyHint, r.KeyID, r.CallerScope, r.Model, r.RequestedModel, r.ResponseModel, r.Provider, r.SessionID, r.UserAgent, r.LatestPrompt, r.LatestResponse}, " "), f.Query) {
+			if !match || !contains(strings.Join([]string{r.ID, r.TraceID, r.KeyAlias, r.KeyHint, r.KeyID, r.CallerScope, r.Model, r.RequestedModel, r.ResponseModel, r.Provider, r.SessionID, r.ClientSessionID, r.UserAgent, r.LatestPrompt, r.LatestResponse}, " "), f.Query) {
 				continue
 			}
 			if p.Total >= f.Offset && len(p.Items) < f.Limit {

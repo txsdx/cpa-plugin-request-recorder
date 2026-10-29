@@ -1,10 +1,11 @@
 {
   "name": "cpa-plugin-request-recorder",
   "private": true,
-  "version": "0.7.2",
+  "version": "0.8.0",
   "scripts": {
     "test:browser": "node scripts/browser-smoke.cjs",
     "test:detail": "node scripts/browser-detail.cjs",
+    "test:sessions": "node scripts/browser-sessions.cjs",
     "test:panel": "node scripts/browser-panel.cjs"
   },
   "devDependencies": {
