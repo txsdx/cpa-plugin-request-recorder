@@ -130,6 +130,15 @@ func (e *Engine) renderMarkdown(r *Record) ([]byte, error) {
 			return nil, err
 		}
 	}
+	if r.Branch != nil {
+		parent := r.Branch.ParentConversationID
+		if parent == "" {
+			parent = r.Branch.ParentSessionID
+		}
+		if err := write("- 父会话：" + markdownLabel(parent) + "\n- 分支历史：" + markdownLabel(branchDescription(r.Branch)) + "\n"); err != nil {
+			return nil, err
+		}
+	}
 	if err := write("\n"); err != nil {
 		return nil, err
 	}

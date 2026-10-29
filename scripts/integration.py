@@ -246,11 +246,46 @@ plugins:
             assert len(detail['conversation'])==4,(label,len(detail['conversation']))
             assert stable not in heads, 'parent, child and Cherry sessions must remain separate'
             heads.add(stable)
+        # Fork twice from the first response, after the parent has advanced.
+        # CPA treats a stale Thread-Id plus a new Session-Id as a real fork.
+        anchor=next(message['response_id'] for message in history['conversation'] if message['source']=='response')
+        forks=[]
+        for label in ['fork-a','fork-b']:
+            headers={'Session-Id':label,'Thread-Id':'stream','X-Codex-Turn-Metadata':json.dumps({'forked_from_thread_id':'stream'})}
+            request('/v1/responses',{'model':'responses-model','stream':True,'previous_response_id':anchor,'input':label+' question'},key=KEY,extra_headers=headers)
+            for _ in range(150):
+                selected=json.loads(request('/v0/management/plugins/request-recorder/records?session=codex:'+label))
+                if selected['total']==1 and selected['items'][0].get('conversation_totals',{}).get('total_tokens')==260:break
+                time.sleep(.1)
+            assert selected['total']==1,(label,selected)
+            head=selected['items'][0]
+            assert head['id']!=stream_head['id'] and head['id'] not in forks,(label,head)
+            forks.append(head['id'])
+            assert head['conversation_turns']==1 and head['conversation_totals']['token_requests']==1,head
+            assert head['branch']['kind']=='fork' and head['branch']['status']=='response',head
+            assert head['branch']['parent_conversation_id']==stream_head['id'],head
+            assert head['branch']['response_id']==anchor,head
+            fork_detail=json.loads(request('/v0/management/plugins/request-recorder/record?id='+head['id']))
+            messages=fork_detail['conversation']
+            assert any('图里是什么？' in m.get('content','') for m in messages),messages
+            assert any(label+' question' in m.get('content','') for m in messages),messages
+            assert not any('继续解释这张图' in m.get('content','') for m in messages),messages
+            assert sum('完整最终快照：' in m.get('content','') for m in messages)==2,messages
+            images=json.loads(request('/v0/management/plugins/request-recorder/images?record_id='+head['id']))['images']
+            assert images and images[0]['status']=='ready',images
+            image_path='/v0/management/plugins/request-recorder/image?record_id='+head['id']+'&id='+images[0]['id']
+            assert request(image_path)==base64.b64decode(PNG)
+            markdown=request('/v0/management/plugins/request-recorder/export/markdown?id='+head['id']).decode('utf-8')
+            assert '分支历史：已继承到父响应' in markdown and '图里是什么？' in markdown
+            assert '继续解释这张图' not in markdown and IMAGE in markdown
+        parent_after=json.loads(request('/v0/management/plugins/request-recorder/record?id='+stream_head['id']))
+        assert parent_after['conversation']==history['conversation'], 'fork changed parent history'
+        assert parent_after['record']['conversation_totals']==totals, 'fork changed parent accounting'
         final_records=json.loads(request('/v0/management/plugins/request-recorder/records'))
-        assert final_records['total']==5,final_records
+        assert final_records['total']==7,final_records
         status=json.loads(request('/v0/management/plugins/request-recorder/status'))
         assert status['unmatched_usage']==0 and status['discarded_usage']==0,status
-        print(json.dumps({'result':'PASS','records':5,'stream_chunks':160,'checks':['native CPA loading','public GUI registration','management authentication','nonstream and SSE capture','usage join','native Responses complete final snapshot without logs','latest conversation replaces prior snapshot','authenticated full-history Markdown export with original images','input and output images','authenticated local image archive','image file persistence','compressed WebP preview and original download','CPAMC alias sync authentication','alias filtering','Cherry Agent prompt_cache_key incremental history','Codex Session-Id incremental history','Codex child Thread-Id isolation','Billing and client session ID filtering'],'workdir':str(work),'port':port},ensure_ascii=False))
+        print(json.dumps({'result':'PASS','records':7,'stream_chunks':160,'checks':['native CPA loading','public GUI registration','management authentication','nonstream and SSE capture','usage join','native Responses complete final snapshot without logs','latest conversation replaces prior snapshot','authenticated full-history Markdown export with original images','input and output images','authenticated local image archive','image file persistence','compressed WebP preview and original download','CPAMC alias sync authentication','alias filtering','Cherry Agent prompt_cache_key incremental history','Codex Session-Id incremental history','Codex child Thread-Id isolation','Billing and client session ID filtering','sibling forks inherit exact response boundary and original images','branch accounting excludes inherited requests','parent remains unchanged'],'workdir':str(work),'port':port},ensure_ascii=False))
         if os.environ.get('KEEP_RUNNING')=='1':
             print('KEEP_RUNNING: press Ctrl+C to stop',flush=True)
             while proc.poll() is None: time.sleep(1)

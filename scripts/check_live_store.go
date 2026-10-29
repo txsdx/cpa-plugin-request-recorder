@@ -1,8 +1,7 @@
 //go:build ignore
 
-// Verify the published private GitHub store with the same scoped credential
-// rules documented for CPA. Credentials are consumed by the official SDK and
-// are never printed or copied into configuration files.
+// Verify the published public registry and Release through the official CPA
+// installer, with no GitHub credential or store-auth configuration.
 package main
 
 import (
@@ -20,15 +19,8 @@ func main() {
 	if len(os.Args) != 2 {
 		panic("usage: check_live_store.go EXPECTED_VERSION|latest")
 	}
-	if os.Getenv("GITHUB_TOKEN") == "" {
-		panic("GITHUB_TOKEN must be supplied by the CI job for private-store verification")
-	}
 	registryURL := "https://raw.githubusercontent.com/txsdx/cpa-plugin-request-recorder/main/registry.json"
-	auth := []sdk.AuthConfig{
-		{Match: "https://raw.githubusercontent.com/txsdx/cpa-plugin-request-recorder/", ApplyTo: []string{sdk.RequestKindRegistry}, Type: sdk.AuthTypeGitHubToken, TokenEnv: "GITHUB_TOKEN"},
-		{Match: "https://api.github.com/repos/txsdx/cpa-plugin-request-recorder/", ApplyTo: []string{sdk.RequestKindMetadata, sdk.RequestKindArtifact}, Type: sdk.AuthTypeGitHubToken, TokenEnv: "GITHUB_TOKEN"},
-	}
-	client := sdk.NewClientWithAuth(&http.Client{Timeout: 90 * time.Second}, registryURL, auth)
+	client := sdk.NewClient(&http.Client{Timeout: 90 * time.Second}, registryURL)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 	registry, err := client.FetchRegistry(ctx)
@@ -37,6 +29,9 @@ func main() {
 		panic("wrong live registry identity")
 	}
 	plugin := registry.Plugins[0]
+	if plugin.AuthRequired {
+		panic("public registry must not require store authentication")
+	}
 	release, err := client.FetchLatestRelease(ctx, plugin)
 	mustLive(err)
 	version, err := sdk.ReleaseVersion(release)
@@ -55,7 +50,7 @@ func main() {
 	if stat, err := os.Stat(result.Path); err != nil || stat.Size() == 0 {
 		panic("live library not installed")
 	}
-	fmt.Printf("PASS: authenticated live registry -> latest %s -> checksum-verified real CPA install (%s/%s)\n", version, runtime.GOOS, runtime.GOARCH)
+	fmt.Printf("PASS: public registry without credentials -> latest %s -> checksum-verified real CPA install (%s/%s)\n", version, runtime.GOOS, runtime.GOARCH)
 }
 func mustLive(err error) {
 	if err != nil {

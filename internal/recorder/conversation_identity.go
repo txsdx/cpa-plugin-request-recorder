@@ -79,10 +79,7 @@ func hostConversationID(value string) string {
 }
 
 func clientConversationID(r *Record) string {
-	body := decode(r.RequestBody)
-	if nested := obj(body["request"]); nested != nil {
-		body = nested
-	}
+	body := conversationBody(r)
 	metadata := obj(body["metadata"])
 
 	// Claude's JSON/legacy user_id embeds a session, rather than identifying a
@@ -117,10 +114,7 @@ func clientConversationID(r *Record) string {
 	// agents must not collapse into their parent's session.
 	sid := sessionHeader(r.RequestHeaders, "Session-Id", "Session_id")
 	tid := sessionHeader(r.RequestHeaders, "Thread-Id", "Thread_id")
-	var turn map[string]any
-	if raw := conversationHeader(r.RequestHeaders, "X-Codex-Turn-Metadata"); len(raw) <= 16<<10 {
-		turn = decode(raw)
-	}
+	turn := codexTurnMetadata(r)
 	if sid == "" {
 		sid = sessionField(turn, "session_id")
 	}
@@ -134,6 +128,18 @@ func clientConversationID(r *Record) string {
 		}
 	}
 	if sid != "" || tid != "" {
+		// CPA resolves a fork before named-agent routing. Thread-Id can still
+		// name the parent while Session-Id names the new fork.
+		if parent := forkParentField(body, turn); parent != "" {
+			child := tid
+			if child == "" || child == parent {
+				child = sid
+			}
+			if child == "" || child == parent {
+				return ""
+			}
+			return "client:" + child
+		}
 		agent := sessionField(turn, "agent_name")
 		agent = strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(agent, "/root/"), "/"))
 		if agent == "root" || agent == "main" {
@@ -158,7 +164,23 @@ func clientConversationID(r *Record) string {
 		return "client:" + id
 	}
 	for _, candidate := range []map[string]any{body, metadata, obj(body["extra_body"])} {
-		if id := sessionField(candidate, "conversation_id", "conversationId", "thread_id", "threadId", "session_id", "sessionId", "chat_id", "chatId"); id != "" {
+		if id := sessionField(candidate, "conversation_id", "conversationId", "thread_id", "threadId", "chat_id", "chatId"); id != "" {
+			if forkParentField(body, turn) == id {
+				return ""
+			}
+			return "client:" + id
+		}
+		if id := sessionField(candidate, "child_session_id", "childSessionId", "session_id", "sessionId", "sessionID"); id != "" {
+			if forkParentField(body, turn) == id {
+				return ""
+			}
+			agent := sessionField(metadata, "agent_id", "subagent_id")
+			if agent == "" {
+				agent = sessionHeader(r.RequestHeaders, "X-Claude-Code-Agent-Id", "X-Agent-Id")
+			}
+			if agent != "" && agent != "main" && forkParentField(body, turn) == "" {
+				return "client:" + id + ":agent:" + agent
+			}
 			return "client:" + id
 		}
 	}

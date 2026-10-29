@@ -444,6 +444,8 @@ function renderRows(items) {
     time.append(
       el("small", "", r.id.slice(0, 12) + (r.stream ? " · STREAM" : " · JSON")),
     );
+    if (r.branch)
+      time.append(el("small", "", r.branch.kind === "fork" ? "↳ 分支会话" : "↳ 子会话"));
     const who = el(
       "td",
       "",
@@ -516,6 +518,8 @@ function renderDetailHeader() {
   $("detail-sub").textContent =
     `会话总耗时 ${metric(duration(totals.duration_ms), totals.duration_requests)} · 总消耗 token ${metric(fmt(totals.total_tokens), totals.token_requests)} · 最新 ${date(r.started_at)}`;
   $("detail-sub").title = "模型请求耗时累计，不含用户停顿。";
+  if (r.branch)
+    $("detail-sub").title += "仅统计本分支请求，继承的父会话历史不重复计入。";
   if (totals.duration_requests < turns || totals.token_requests < turns)
     $("detail-sub").title +=
       `耗时已统计 ${totals.duration_requests}/${turns} 轮，token 已统计 ${totals.token_requests}/${turns} 轮；未记录的历史统计无法补回。`;
@@ -954,6 +958,26 @@ function renderDetail(preserveScroll = false) {
   if (r.warnings?.length)
     body.append(el("div", "warnings", r.warnings.join("\n")));
   if (activeTab === "conversation") {
+    if (r.branch) {
+      const branch = r.branch;
+      const states = {
+        response: "已继承到指定父响应，此后的历史独立保存。",
+        context: "已继承请求上下文确认的公共历史，此后的历史独立保存。",
+        linked: "已关联父会话；分叉位置尚未确认，展示本请求携带的历史。",
+        missing: "父会话或分叉点未被记录，展示请求携带的可用历史。",
+      };
+      const info = el("div", "view-note branch-note");
+      info.append(el("span", "", (branch.kind === "fork" ? "分支会话：" : "子会话：") + (states[branch.status] || states.missing)));
+      if (branch.parent_conversation_id) {
+        const open = el("button", "link", "打开父会话");
+        open.type = "button";
+        open.dataset.parentConversation = branch.parent_conversation_id;
+        open.title = "查看父会话当前记录；已继承的历史独立保留在本分支。";
+        open.onclick = () => openDetail(branch.parent_conversation_id);
+        info.append(open);
+      }
+      body.append(info);
+    }
     body.append(
       el(
         "div",

@@ -31,15 +31,15 @@ CLIProxyAPI 的原生插件：在模型请求结束后更新完整会话，在 *
 
 Linux 包在 Debian 12 / glibc 环境原生编译，匹配所检查 CPA Dockerfile 的系统基线；Alpine / musl 和 Windows ARM64 不包含在这五种发布目标中。Docker 部署应按 **容器内部** 的 OS / 架构选择，不是按浏览器或宿主桌面系统选择。
 
-以 Linux amd64 `v0.8.0` 为例：
+以 Linux amd64 `v0.8.1` 为例：
 
-1. 下载 `request-recorder_0.8.0_linux_amd64.zip` 和 `checksums.txt`，放在同一目录。
+1. 下载 `request-recorder_0.8.1_linux_amd64.zip` 和 `checksums.txt`，放在同一目录。
 2. 校验并解压到 CPA 的插件目录：
 
    ```bash
    sha256sum --ignore-missing --check checksums.txt
    mkdir -p /path/to/CLIProxyAPI/plugins/linux/amd64
-   unzip request-recorder_0.8.0_linux_amd64.zip -d /path/to/CLIProxyAPI/plugins/linux/amd64
+   unzip request-recorder_0.8.1_linux_amd64.zip -d /path/to/CLIProxyAPI/plugins/linux/amd64
    ```
 
 3. 合并下面的插件配置，设置数据库持久化，然后重启 CPA。无需配置日志目录。
@@ -93,26 +93,11 @@ plugins:
     - "https://raw.githubusercontent.com/txsdx/cpa-plugin-request-recorder/main/registry.json"
 ```
 
-刷新商店，选择 `CPA Request Recorder · 请求记录`，点击安装。以后刷新检查更新，再点击更新即可。CPA 从仓库的**最新正式 Release**解析版本，自动选择 OS / CPU 对应 zip，校验 `checksums.txt`，并写入带版本的库文件（例如 `plugins/linux/amd64/request-recorder-v0.8.0.so`）。不要为了匹配版本再手动重命名 Release 的 zip 或库。
+刷新商店，选择 `CPA Request Recorder · 请求记录`，点击安装。以后刷新检查更新，再点击更新即可。CPA 从仓库的**最新正式 Release**解析版本，自动选择 OS / CPU 对应 zip，校验 `checksums.txt`，并写入带版本的库文件（例如 `plugins/linux/amd64/request-recorder-v0.8.1.so`）。不要为了匹配版本再手动重命名 Release 的 zip 或库。
 
 安装源解决的是下载安装和版本更新。仍需按本文配置数据库持久化；GUI 通过 CPAMC 插件资源打开。更新是否热加载或要求重启由 CPA 版本及运行平台决定。预发布版本不会被 GitHub latest 接口当作正式更新推送。
 
-**当前仓库是私有仓库。** 仅在浏览器中登录 GitHub 不会赋予 CPA 服务访问权限；需在 **CPA 服务的进程环境**中安全设置 `CPA_PLUGIN_GITHUB_TOKEN`，使用对这个仓库有 Contents 读取权限的凭证，然后合并以下规则。不要把 token 写进 registry URL、配置文件、仓库或聊天。
-
-```yaml
-plugins:
-  store-auth:
-    - match: "https://raw.githubusercontent.com/txsdx/cpa-plugin-request-recorder/"
-      apply-to: [registry]
-      type: github-token
-      token-env: CPA_PLUGIN_GITHUB_TOKEN
-    - match: "https://api.github.com/repos/txsdx/cpa-plugin-request-recorder/"
-      apply-to: [metadata, artifact]
-      type: github-token
-      token-env: CPA_PLUGIN_GITHUB_TOKEN
-```
-
-两条规则分别覆盖 registry 与 Release 元数据 / 资产 API，不把凭证发送到任意下载域名。Docker 需把该环境变量传入 CPA 容器。若以后将仓库设为公开，可省略认证规则，并相应把 registry 的 `auth_required` 改为 false。
+**当前仓库已公开。** 上面的 registry、Release 元数据和安装包均可公开下载，`auth_required` 已设为 `false`；安装和更新无需配置 GitHub token 或 `store-auth`。此前仅用于本仓库的认证规则可以移除。插件记录、原图和管理操作仍由 CPA 管理鉴权保护，公开的是插件代码和安装包。
 
 ### 维护者发布新版本
 
@@ -144,7 +129,7 @@ registry.json
 
 版本不带 `v` 写进附件名，Git 标签带 `v`。ZIP 根目录只有 `request-recorder.so` / `.dylib` / `.dll`，不包含目录、`.h` 文件或其他动态库。发布前会使用固定 CPA 源码中的真实 registry 解析器和安装器校验全部五个平台的实际产物、重复安装、版本判断及校验和拒绝行为。
 
-Release 流程包含五个平台构建与发布。额外验证了从线上私有 registry 读取最新 Release、使用文档中的 scoped GitHub 认证、通过 CPA 官方安装器真实下载并校验 Linux amd64 插件；公开 Release 中的五份 ZIP 及其校验和也已逐份复核。
+Release 流程包含五个平台构建与发布。发布后使用不带 GitHub 凭证的 CPA 官方安装器，读取线上公开 registry 和最新 Release，真实下载并校验 Linux amd64 插件；五个平台的 ZIP 和校验和在发布前通过官方安装器验证。
 
 根目录 `registry.json` 省略可选展示版本，长期作为稳定的商店源；Release 附件中的 registry 由同一元数据自动生成，包含该 Release 版本。CPA 以 GitHub 最新正式 Release 为版本真相，因此更新不需要 Action 回写 main。正式发布版本不会被覆盖，失败只留下可重试的 draft；发布使用仓库自带的 `GITHUB_TOKEN`，不需额外 PAT。
 
@@ -222,11 +207,18 @@ plugins:
 
 不需要安装 Key Billing，也不需要开启 CPA request-log；两者使用同一 CPA 提供的会话信息。元数据中的 `client_session_id` 是实际归并标识，`session_id` 保留宿主提供的原值；搜索和“会话 ID”筛选同时支持 Key Billing 中的 `codex:…` / `pck:cherry-agent:…` 及对应客户端原值。不同明确会话 ID 即使消息内容相同也分别保存。
 
+v0.8.1 补齐独立分支历史：参考 Key Billing 展示的 `ParentSessionID`，同时读取 Codex fork / parent 元数据、通用 `parent_session_id` / `forkSource` 与 Agent 父子信息。Codex 的 Thread-Id 仍指向父线程、Session-Id 已变为新分支时，按新分支识别。每个独立分支仍只保留一条最新完整历史；父会话和兄弟分支各自更新，互不覆盖。
+
+- 有已记录的 `previous_response_id` 时，只继承到该响应结束，排除父会话后来的消息；嵌套分支保留明确的直接父会话关系。
+- 没有响应锚点时，只继承子请求从开头重发、能逐条核对的公共历史。只有父 ID 不能确定分叉时间，界面只显示关联和本请求可用历史，不拼入父会话当前的全部内容。
+- 继承的文字、可见思考、工具和原图引用独立保留；父会话后来重生成或被清理，不会删除已继承的历史与已归档原图。公共正文仍按块压缩去重，原图文件复用。
+- 分支耗时 / token 只累计该分支的请求，不重复计入继承的父请求。详情提示继承状态，提供“打开父会话”；Markdown 同时导出父关系及分支完整历史。父条目已被清理时，不能再打开父条目，但仍可查看分支已保存的内容。
+
 没有明确 ID 时，按请求重发的完整上下文和已记录回答精确接续，系统指令与工具配置也参与区分；不会只按 key / 模型或相似提示词合并。新出现的可靠 ID 能通过完整上下文接续此前没有 ID 的记录；已有明确 ID 的其他会话不会被这种接续覆盖。
 
 新一轮原子覆盖同一条会话，旧请求行、旧分支正文和无引用块随之删除；保留当前分支完整消息，旧思考和工具结果即使客户端不重发也尽可能保留。明确会话下的增量输入可直接追加；裁剪后重发的上下文尾部按完整消息精确匹配工具结果 / 已有回答，避免重复追加，并支持从该位置重生成。明确会话内仅含用户消息的输入按增量追加，不能只因重复的“继续”等提示词裁掉历史；仅凭这种输入也无法识别客户端的重生成操作。穿插在工具 / 用户消息间的 developer 消息保持原顺序。带有明确历史上下文的重新生成覆盖对应回答及之后的旧分支。按请求开始时间保护较新的轮次，延迟完成的旧请求不能覆盖新快照。独立会话和不同 API key 分开保存；稳定会话 ID 与最新请求 ID 分别为 `id` / `request_id`。
 
-v0.8.0 可保留现有会话数据库，新请求按上述规则接续；不会自动全库重建已经拆散的历史条目，未观察到的旧消息仍无法补造。
+v0.8.1 可保留现有会话数据库，新请求按上述规则接续；不会自动全库重建已经拆散的历史条目，未观察到的旧消息仍无法补造。
 
 每条会话的列表耗时、token、状态、原请求与原响应对应**最新一次模型请求**。详情的模型名称旁显示**会话总耗时 / 总消耗 token / 最新请求时间**：按插件已记录轮次累计模型请求耗时与宿主 token，包含重生成、重试用量，不计入用户停顿时间；重复保存与当前轮次的 usage 更正不会重复累计。`conversation_turns` 是观察到的更新次数，包含重新生成。旧会话只保存了最后一轮指标，缺失的早期累计统计无法补回，会显示“部分”，悬停可查看已统计轮数。
 
@@ -359,7 +351,7 @@ make package                      # 动态库、单库 zip、checksums.txt
 CPA_BIN=/absolute/path/to/cli-proxy-api python3 scripts/integration.py
 ```
 
-实际验证 CPA 源码 `307803510bce87f986fcf7b1a84190f105c7b4aa`：动态库装载、CPAMC 菜单资源、管理鉴权、普通/160 分片流式请求、usage 关联、完整 Responses 结束快照直接保存、请求/响应原图文件落盘与鉴权读取、别名筛选、Cherry / Codex 增量会话归并、父子线程隔离与 Billing 会话 ID 筛选均通过。没有连接真实用户的 CPA 实例；线上模型和各版本宿主的行为需要部署后验证。
+实际验证 CPA 源码 `307803510bce87f986fcf7b1a84190f105c7b4aa`：动态库装载、CPAMC 菜单资源、管理鉴权、普通/160 分片流式请求、usage 关联、完整 Responses 结束快照直接保存、请求/响应原图文件落盘与鉴权读取、别名筛选、Cherry / Codex 增量会话归并、父子线程隔离、兄弟分支按响应边界继承原图、独立用量统计与 Billing 会话 ID 筛选均通过。没有连接真实用户的 CPA 实例；线上模型和各版本宿主的行为需要部署后验证。
 
 独立 GUI 开发服务器与插件共用实现，只用于开发，不是生产部署所必需的服务：
 
@@ -368,7 +360,7 @@ CPA_BIN=/absolute/path/to/cli-proxy-api python3 scripts/integration.py
 go run -tags=nodynamic ./cmd/recorder -listen 127.0.0.1:8787 -db /path/to/development.db
 ```
 
-浏览器 smoke test 需要 Chromium 和包含集成测试五条记录的数据库（用 `INTEGRATION_DIR=/path/to/fixture` 保留集成测试数据库）。对测试实例设置 `RECORDER_MANAGEMENT_KEY` 后：
+浏览器 smoke test 需要 Chromium 和包含集成测试七条记录的数据库（用 `INTEGRATION_DIR=/path/to/fixture` 保留集成测试数据库）。对测试实例设置 `RECORDER_MANAGEMENT_KEY` 后：
 
 ```bash
 npm ci

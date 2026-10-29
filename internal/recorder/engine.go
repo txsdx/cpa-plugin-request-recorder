@@ -210,6 +210,9 @@ func (e *Engine) Request(req wire.Request, after bool) error {
 	return nil
 }
 func (e *Engine) metadata(r *Record, m map[string]any) {
+	if fork, ok := m["is_fork"].(bool); ok && fork {
+		r.IsFork = true
+	}
 	for _, p := range []struct {
 		dst  *string
 		keys []string
@@ -355,7 +358,9 @@ func applyUsage(r *Record, u wire.Usage) {
 	if u.SessionID != "" {
 		r.SessionID = u.SessionID
 	}
-	r.ParentSessionID = u.ParentSessionID
+	if u.ParentSessionID != "" {
+		r.ParentSessionID = u.ParentSessionID
+	}
 	if u.ReasoningEffort != "" {
 		r.ReasoningEffort = u.ReasoningEffort
 	}

@@ -586,6 +586,12 @@ details.headers {
   font-size: 12px;
   color: #367275;
 }
+.branch-note {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
 .detail-body h3 {
   font-size: 13px;
   margin-top: 25px;

@@ -115,14 +115,16 @@ func (s *Store) prepareConversation(r *Record) ([]string, error) {
 	points := contextPoints(input)
 	session := clientConversationID(r)
 	r.ClientSessionID = session
+	parentSession, fork := parentConversationIdentity(r, session)
+	r.IsFork = fork
+	branchCandidate := parentSession != "" || fork
 	scope := r.KeyID
 	if r.CallerScope != "" {
 		scope = "caller:" + r.CallerScope
 	}
 	namespace := scope + "/config:" + contextConfiguration(r)
 	keys := []string{}
-	var previous *Record
-	var lookupErr error
+	var previous, parent *Record
 	err := s.view(func(tx *bolt.Tx) error {
 		id := r.ID
 		if raw := tx.Bucket(records).Get([]byte(id)); raw != nil {
@@ -137,48 +139,84 @@ func (s *Store) prepareConversation(r *Record) ([]string, error) {
 		if scope == "" {
 			return nil
 		}
-		lookup := func(key string) bool {
+		read := func(key string) (*Record, error) {
 			value := tx.Bucket(conversationKeys).Get([]byte(key))
 			if value == nil {
-				return false
+				return nil, nil
 			}
 			raw := tx.Bucket(records).Get(value)
 			if raw == nil {
-				return false
+				return nil, nil
 			}
-			found, err := decodeStoredRecord(tx, raw)
+			return decodeStoredRecord(tx, raw)
+		}
+		if session != "" {
+			found, err := read(contextKey(scope, "session", session))
 			if err != nil {
-				lookupErr = err
-				return false
+				return err
 			}
-			if foundSession := clientConversationID(found); session != "" && foundSession != "" && foundSession != session {
-				return false
+			if found != nil && clientConversationID(found) == session {
+				previous = found
 			}
-			previous = found
-			return true
 		}
-		if session != "" && lookup(contextKey(scope, "session", session)) {
-			return nil
+		if previousResponseID != "" && (previous == nil || branchMayInherit(previous, r)) {
+			found, err := read(contextKey(scope, "response", previousResponseID))
+			if err != nil {
+				return err
+			}
+			if found != nil && (previous == nil || found.ID != previous.ID) {
+				foundSession := clientConversationID(found)
+				distinct := session != "" && foundSession != "" && session != foundSession
+				if distinct || branchCandidate && (found.Branch == nil || found.Branch.ParentSessionID != parentSession) {
+					parent = found
+					branchCandidate = true
+					fork = true
+				} else if previous == nil {
+					previous, linked = found, true
+				}
+			}
 		}
-		if previousResponseID != "" && lookup(contextKey(scope, "response", previousResponseID)) {
-			linked = true
-			return nil
+		if branchCandidate && (previous == nil || branchMayInherit(previous, r)) {
+			if parentSession != "" {
+				// An explicit parent wins over the global response index, which
+				// can refer to an ancestor when the parent inherited that response.
+				found, err := read(contextKey(scope, "session", parentSession))
+				if err != nil {
+					return err
+				}
+				parent = found
+			}
+			if parent != nil && (previous != nil && parent.ID == previous.ID || clientConversationID(parent) == session && session != "") {
+				parent = nil
+			}
 		}
-		if len(points) > 0 && lookup(contextKey(namespace, "input", points[len(points)-1].digest)) {
-			return nil
-		}
-		for i := len(points) - 1; i >= 0; i-- {
-			if lookup(contextKey(namespace, "state", points[i].digest)) {
-				break
+		if previous == nil && !branchCandidate {
+			lookup := func(kind, digest string) (bool, error) {
+				found, err := read(contextKey(namespace, kind, digest))
+				if err != nil || found == nil {
+					return false, err
+				}
+				if foundSession := clientConversationID(found); session != "" && foundSession != "" && foundSession != session {
+					return false, nil
+				}
+				previous = found
+				return true, nil
+			}
+			if len(points) > 0 {
+				if found, err := lookup("input", points[len(points)-1].digest); err != nil || found {
+					return err
+				}
+			}
+			for i := len(points) - 1; i >= 0; i-- {
+				if found, err := lookup("state", points[i].digest); err != nil || found {
+					return err
+				}
 			}
 		}
 		return nil
 	})
 	if err != nil {
 		return nil, err
-	}
-	if lookupErr != nil {
-		return nil, lookupErr
 	}
 	if previous != nil && previous.RequestID != r.RequestID && !r.StartedAt.IsZero() && previous.StartedAt.After(r.StartedAt) {
 		*r = *previous
@@ -189,6 +227,12 @@ func (s *Store) prepareConversation(r *Record) ([]string, error) {
 		return aliases, err
 	}
 	if previous != nil {
+		if previous.Branch != nil {
+			branch := *previous.Branch
+			r.Branch = &branch
+		}
+		r.InheritedResponseIDs = append([]string(nil), previous.InheritedResponseIDs...)
+		r.IsFork = r.IsFork || previous.IsFork
 		if session == "" {
 			session = clientConversationID(previous)
 			r.ClientSessionID = session
@@ -204,22 +248,11 @@ func (s *Store) prepareConversation(r *Record) ([]string, error) {
 		} else {
 			history := conversationMessages(previous)
 			if previousResponseID != "" {
-				end := 0
-				for i, message := range history {
-					if message.ResponseID == previousResponseID {
-						end = i + 1
-					}
-				}
+				end := responseHistoryEnd(history, previousResponseID)
 				if end > 0 {
 					history = history[:end]
 					linked = true
-					cleaned := input[:0]
-					for _, message := range input {
-						if message.Kind != "notice" {
-							cleaned = append(cleaned, message)
-						}
-					}
-					input = cleaned
+					input = withoutHistoryNotice(input)
 				} else {
 					history = nil
 				}
@@ -244,6 +277,30 @@ func (s *Store) prepareConversation(r *Record) ([]string, error) {
 		r.ConversationStartedAt = r.StartedAt
 		r.ConversationTurns = 1
 	}
+	if branchCandidate && (previous == nil || branchMayInherit(previous, r)) {
+		branch := &ConversationBranch{Kind: "child", ParentSessionID: parentSession, ResponseID: previousResponseID}
+		if fork {
+			branch.Kind, r.IsFork = "fork", true
+		}
+		if parent != nil {
+			branch.ParentConversationID = parent.ID
+			if branch.ParentSessionID == "" {
+				branch.ParentSessionID = clientConversationID(parent)
+			}
+		}
+		inherited, status := inheritedBranchHistory(parent, input, previousResponseID)
+		branch.Status, r.Branch = status, branch
+		if len(inherited) > 0 {
+			messages := mergeConversation(inherited, withoutHistoryNotice(input), output, status == "response")
+			resolveToolNames(messages)
+			if conversationMessageBytes(messages) > s.historyLimit {
+				return nil, ErrConversationTooLarge
+			}
+			data, _ := json.Marshal(messages)
+			r.ConversationHistory = string(data)
+			r.InheritedResponseIDs = inheritedResponseIDs(inherited)
+		}
+	}
 	if r.ConversationHistory == "" {
 		messages := append(input, output...)
 		resolveToolNames(messages)
@@ -258,8 +315,12 @@ func (s *Store) prepareConversation(r *Record) ([]string, error) {
 	}
 	updateConversationTotals(r, previous)
 	if scope != "" {
+		inherited := map[string]bool{}
+		for _, id := range r.InheritedResponseIDs {
+			inherited[id] = true
+		}
 		for _, message := range conversationMessages(r) {
-			if message.ResponseID != "" {
+			if message.ResponseID != "" && !inherited[message.ResponseID] {
 				keys = append(keys, contextKey(scope, "response", message.ResponseID))
 			}
 		}

@@ -100,6 +100,12 @@ func (s *Store) Save(input *Record) error {
 	if err != nil {
 		return err
 	}
+	branchImages := map[string]bool{}
+	if r.Branch != nil && (r.Branch.Status == "response" || r.Branch.Status == "context") {
+		for _, source := range recordImageSources(r, 128) {
+			branchImages[source.id] = true
+		}
+	}
 	stored, chunks := prepareStoredRecord(r)
 	raw, err := json.Marshal(&stored)
 	if err != nil {
@@ -199,6 +205,11 @@ func (s *Store) Save(input *Record) error {
 		}
 		if err := tx.Bucket(imageJobs).Put(id, []byte{1}); err != nil {
 			return err
+		}
+		if len(branchImages) > 0 {
+			if err := copyBranchImages(tx, r.Branch.ParentConversationID, r.ID, branchImages); err != nil {
+				return err
+			}
 		}
 		if err := tx.Bucket(records).Put(id, raw); err != nil {
 			return err

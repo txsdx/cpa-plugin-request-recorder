@@ -8,7 +8,7 @@
       "author": "txsdx",
       "repository": "https://github.com/txsdx/cpa-plugin-request-recorder",
       "homepage": "https://github.com/txsdx/cpa-plugin-request-recorder#readme",
-      "auth_required": true,
+      "auth_required": false,
       "tags": [
         "Interceptor",
         "Management",
