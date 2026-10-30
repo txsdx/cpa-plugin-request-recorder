@@ -21,6 +21,9 @@ var ErrConversationTooLarge = errors.New("会话历史超过 max_body_bytes，�
 func conversationMessages(r *Record) []Message {
 	var messages []Message
 	if r.ConversationHistory != "" && json.Unmarshal([]byte(r.ConversationHistory), &messages) == nil {
+		for i := range messages {
+			normalizeToolImages(&messages[i])
+		}
 		return messages
 	}
 	return Conversation(r.RequestBody, r.ResponseBody)
@@ -102,6 +105,17 @@ func (s *Store) prepareConversation(r *Record) ([]string, error) {
 		r.RequestID = r.ID
 	}
 	input, output := requestMessages(r.RequestBody), responseMessages(r.ResponseBody)
+	var finalMessages []Message
+	setHistory := func(messages []Message) error {
+		resolveToolNames(messages)
+		if conversationMessageBytes(messages) > s.historyLimit {
+			return ErrConversationTooLarge
+		}
+		data, _ := json.Marshal(messages)
+		r.ConversationHistory = string(data)
+		finalMessages = messages
+		return nil
+	}
 	responseID := str(decode(r.ResponseBody)["id"])
 	for i := range output {
 		output[i].ResponseID = responseID
@@ -276,12 +290,9 @@ func (s *Store) prepareConversation(r *Record) ([]string, error) {
 				}
 			}
 			messages := mergeConversation(history, input, output, session != "" || linked)
-			resolveToolNames(messages)
-			if conversationMessageBytes(messages) > s.historyLimit {
-				return nil, ErrConversationTooLarge
+			if err := setHistory(messages); err != nil {
+				return nil, err
 			}
-			data, _ := json.Marshal(messages)
-			r.ConversationHistory = string(data)
 			r.ConversationTurns++
 		}
 	} else {
@@ -310,34 +321,33 @@ func (s *Store) prepareConversation(r *Record) ([]string, error) {
 		branch.Status, r.Branch = status, branch
 		if len(inherited) > 0 {
 			messages := mergeConversation(inherited, withoutHistoryNotice(input), output, status == "response")
-			resolveToolNames(messages)
-			if conversationMessageBytes(messages) > s.historyLimit {
-				return nil, ErrConversationTooLarge
+			if err := setHistory(messages); err != nil {
+				return nil, err
 			}
-			data, _ := json.Marshal(messages)
-			r.ConversationHistory = string(data)
 			r.InheritedResponseIDs = inheritedResponseIDs(inherited)
 		}
 	}
 	if r.ConversationHistory == "" {
 		messages := append(input, output...)
-		resolveToolNames(messages)
-		if conversationMessageBytes(messages) > s.historyLimit {
-			return nil, ErrConversationTooLarge
+		if err := setHistory(messages); err != nil {
+			return nil, err
 		}
-		data, _ := json.Marshal(messages)
-		r.ConversationHistory = string(data)
 	}
 	if len(r.ConversationHistory) > s.historyLimit {
 		return nil, ErrConversationTooLarge
 	}
 	updateConversationTotals(r, previous)
+	if finalMessages == nil {
+		finalMessages = conversationMessages(r)
+	}
+	steps := conversationSteps(finalMessages)
+	r.ConversationSteps = &steps
 	if scope != "" {
 		inherited := map[string]bool{}
 		for _, id := range r.InheritedResponseIDs {
 			inherited[id] = true
 		}
-		for _, message := range conversationMessages(r) {
+		for _, message := range finalMessages {
 			if message.ResponseID != "" && !inherited[message.ResponseID] {
 				keys = append(keys, contextKey(scope, "response", message.ResponseID))
 			}
@@ -349,7 +359,7 @@ func (s *Store) prepareConversation(r *Record) ([]string, error) {
 			if len(points) > 0 {
 				keys = append(keys, contextKey(namespace, "input", points[len(points)-1].digest))
 			}
-			states := contextPoints(conversationMessages(r))
+			states := contextPoints(finalMessages)
 			for i, point := range states {
 				if i+1 == len(states) || states[i+1].role != point.role {
 					kind := "input"

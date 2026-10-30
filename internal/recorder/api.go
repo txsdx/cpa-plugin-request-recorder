@@ -140,6 +140,11 @@ func (e *Engine) Management(req wire.ManagementRequest, web fs.FS) wire.Manageme
 				return result(500, map[string]string{"error": "database read failed"})
 			}
 			messages := conversationMessages(r)
+			if r.ConversationSteps == nil {
+				steps := conversationSteps(messages)
+				r.ConversationSteps = &steps
+				_ = e.store.fillConversationSteps(r.ID, r.RequestID, steps)
+			}
 			if r.Images == nil {
 				if !e.images.pending(r.ID) {
 					e.images.enqueue(r.ID)
@@ -155,6 +160,15 @@ func (e *Engine) Management(req wire.ManagementRequest, web fs.FS) wire.Manageme
 				}
 			}
 			e.images.decorate(messages, r.Images)
+			// Previously stored tool JSON can reveal newly recognized images,
+			// even when the old archive inventory was already marked complete.
+			for _, m := range messages {
+				for _, img := range m.Images {
+					if img.Status == "pending" && !e.images.pending(r.ID) {
+						e.images.enqueue(r.ID)
+					}
+				}
+			}
 			if chatOnly {
 				// Base64 originals must not travel in hidden raw fields when the
 				// browser only needs the conversation and WebP thumbnails.

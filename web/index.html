@@ -122,6 +122,7 @@
               <col class="col-caller" />
               <col class="col-model" />
               <col class="col-state" />
+              <col class="col-steps" />
               <col class="col-timing" />
               <col class="col-tokens" />
               <col />
@@ -133,8 +134,9 @@
                 <th>请求者</th>
                 <th>模型 / 提供商</th>
                 <th>状态</th>
+                <th title="用户消息、模型回复、工具调用和工具结果计步；相邻文字、思考和图片按同一消息合并，系统与开发者指令不计。">会话长度</th>
                 <th>首 token / 总耗时</th>
-                <th>Token / 缓存命中</th>
+                <th title="最新一次请求的输入、输出及总 Token；缓存显示输入缓存比例，会话累计见详情。">最新 Token</th>
                 <th>最新用户提示词</th>
                 <th>模型最新响应</th>
               </tr>

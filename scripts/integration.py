@@ -127,6 +127,11 @@ plugins:
         else: raise AssertionError('unauthenticated record access')
         for stream in [False,True]:
             body={'model':'mock-model','stream':stream,'messages':[{'role':'user','content':[{'type':'text','text':'图里是什么？'},{'type':'image_url','image_url':{'url':IMAGE}}]}]}
+            if not stream:
+                body['messages'] += [
+                    {'role':'assistant','tool_calls':[{'id':'call_read_image','type':'function','function':{'name':'Read','arguments':'{"path":"synthetic.png"}'}}]},
+                    {'role':'tool','tool_call_id':'call_read_image','name':'Read','content':json.dumps([{'image_url':IMAGE}])}
+                ]
             if stream:
                 body={'model':'responses-model','stream':True,'input':[{'role':'user','content':[{'type':'input_text','text':'图里是什么？'},{'type':'input_image','image_url':IMAGE}]}]}
             data=request('/v1/responses' if stream else '/v1/chat/completions',body,key=KEY,session='stream' if stream else 'json')
@@ -169,6 +174,12 @@ plugins:
                 assert '完整最终快照：' in d['record']['latest_response']
             else:
                 assert any(m.get('images') for m in d['conversation'] if m['source']=='request')
+                tool=next(m for m in d['conversation'] if m['kind']=='tool_result')
+                assert tool['name']=='Read' and len(tool['images'])==1 and not tool['content'],tool
+                assert d['record']['conversation_steps']==4,d['record']
+                assert d['record']['tokens']['InputTokens']+d['record']['tokens']['OutputTokens']==d['record']['tokens']['TotalTokens']==110
+                chat_view=request('/v0/management/plugins/request-recorder/record?id='+item['id']+'&view=chat')
+                assert b'base64,' not in chat_view, 'inline tool payload must not reach the replay renderer'
         # An incremental turn in the same explicit client session must replace
         # its row while retaining the prior text and image history.
         stream_head=next(item for item in records['items'] if item['stream'])
@@ -186,6 +197,8 @@ plugins:
         assert any(message.get('images') for message in history['conversation'])
         totals=history['record']['conversation_totals']
         assert totals['total_tokens']==520 and totals['token_requests']==2,totals
+        assert history['record']['conversation_steps']==4
+        assert history['record']['tokens']['TotalTokens']==260, 'latest tokens must not use conversation cumulative totals'
         assert totals['duration_requests']==2 and totals['duration_ms']>=history['record']['duration_ms'],totals
         markdown_path='/v0/management/plugins/request-recorder/export/markdown?id='+stream_head['id']
         markdown=request(markdown_path).decode('utf-8')

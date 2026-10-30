@@ -60,6 +60,15 @@ func imageMessage(role string, b map[string]any) Message {
 		}
 		url = "data:" + mime + ";base64," + encoded
 	}
+	if str(b["type"]) == "image" && str(b["data"]) != "" {
+		mime := str(b["mimeType"])
+		if mime == "" {
+			mime = str(b["mime_type"])
+		}
+		if strings.HasPrefix(mime, "image/") {
+			url = "data:" + mime + ";base64," + str(b["data"])
+		}
+	}
 	if str(b["type"]) == "image_generation_call" {
 		mime := "image/png"
 		switch str(b["output_format"]) {
@@ -134,13 +143,18 @@ func blocks(role string, content any) []Message {
 			for _, part := range blocks("tool", b["content"]) {
 				m.Images = append(m.Images, part.Images...)
 			}
+			normalizeToolImages(&m)
 			out = append(out, m)
 		case "image", "image_url", "input_image", "output_image":
 			out = append(out, imageMessage(role, b))
 		case "input_audio", "audio", "file", "document", "input_file":
 			out = append(out, message(role, "attachment", printable(b)))
 		default:
-			out = append(out, message(role, "structured", printable(b)))
+			if b["image_url"] != nil {
+				out = append(out, imageMessage(role, b))
+			} else {
+				out = append(out, message(role, "structured", printable(b)))
+			}
 		}
 	}
 	return out
@@ -170,6 +184,7 @@ func chatMessage(m map[string]any) []Message {
 			out[i].Kind = "tool_result"
 			out[i].ToolCallID = str(m["tool_call_id"])
 			out[i].Name = str(m["name"])
+			normalizeToolImages(&out[i])
 		}
 	}
 	for _, k := range []string{"reasoning_content", "reasoning"} {
@@ -203,6 +218,7 @@ func responseItem(m map[string]any) []Message {
 	case "function_call_output":
 		t := message("tool", "tool_result", printable(m["output"]))
 		t.ToolCallID = str(m["call_id"])
+		normalizeToolImages(&t)
 		return []Message{t}
 	case "reasoning":
 		out := []Message{}
@@ -245,6 +261,7 @@ func geminiContent(m map[string]any) []Message {
 			t := message("tool", "tool_result", printable(f["response"]))
 			t.Name = str(f["name"])
 			t.ToolCallID = str(f["id"])
+			normalizeToolImages(&t)
 			out = append(out, t)
 		}
 		if p["inlineData"] != nil || p["inline_data"] != nil {
@@ -331,6 +348,9 @@ func fullResponse(m map[string]any) []Message {
 		data, _ := json.Marshal(m["messages"])
 		var messages []Message
 		_ = json.Unmarshal(data, &messages)
+		for i := range messages {
+			normalizeToolImages(&messages[i])
+		}
 		return messages
 	}
 	out := []Message{}

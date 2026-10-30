@@ -16,7 +16,19 @@ const assert = require('node:assert/strict');
     await page.locator('#management-key').fill(key);
     await page.locator('#login-form button[type=submit]').click();
     await page.locator('#login').waitFor({state: 'hidden'});
-    await page.locator('#rows tr').filter({hasText: '继续解释这张图'}).click();
+    const counts = await page.evaluate(() => [
+      latestRequestTokens({provider:'openai', tokens:{InputTokens:100,OutputTokens:10,ReasoningTokens:5,CachedTokens:50,TotalTokens:110},conversation_totals:{total_tokens:999}}),
+      latestRequestTokens({provider:'claude', tokens:{InputTokens:10,CacheReadTokens:100,CacheCreationTokens:50,OutputTokens:5,ReasoningTokens:3,TotalTokens:165}}),
+      latestRequestTokens({provider:'gemini', tokens:{InputTokens:100,OutputTokens:10,ReasoningTokens:5,TotalTokens:115}}),
+      latestRequestTokens({provider:'openai', tokens:{InputTokens:0,OutputTokens:0,TotalTokens:80}})
+    ]);
+    assert.deepEqual(counts,[{input:100,output:10,total:110},{input:160,output:5,total:165},{input:100,output:15,total:115},{total:80}]);
+    const streamRow = page.locator('#rows tr').filter({hasText: '继续解释这张图'});
+    assert.equal(await streamRow.locator('[data-conversation-steps]').textContent(), '4 步');
+    const usage = await streamRow.locator('[data-request-tokens]').textContent();
+    assert(usage.startsWith('260') && usage.includes('输入 100') && usage.includes('输出 160'));
+    assert(!usage.includes('520'), 'list tokens must represent the latest request');
+    await streamRow.click();
     await page.locator('#detail').waitFor({state: 'visible'});
     const bounds = await page.locator('#detail').boundingBox();
     assert.deepEqual(bounds, {x: 0, y: 0, width: 1000, height: 500});

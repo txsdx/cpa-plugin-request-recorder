@@ -19,7 +19,7 @@ const assert = require('node:assert/strict');
   await page.locator('#login').waitFor({state:'hidden'});await page.waitForFunction(()=>document.querySelectorAll('#rows tr').length>=2);
   const fixtureCount=await page.locator('#rows tr').count();
   await page.locator('#storage-open').click();await page.locator('#storage-body').getByText('去重压缩后正文',{exact:true}).waitFor();assert((await page.locator('#storage-body').textContent()).includes('自动淘汰最旧记录'));await page.locator('[data-close=storage-view]').click();
-  assert.equal(await page.locator('#auto').isChecked(),true);assert.equal(await page.locator('#refresh-interval').inputValue(),'1');assert.equal(await page.locator('.toolbar #refresh').count(),1);assert.equal(await page.locator('thead th').count(),8);const widthRatio=await page.locator('main').evaluate(el=>el.getBoundingClientRect().width/window.innerWidth);assert(widthRatio>0.89&&widthRatio<0.91);assert((await page.locator('#rows').textContent()).includes('图里是什么？'));
+  assert.equal(await page.locator('#auto').isChecked(),true);assert.equal(await page.locator('#refresh-interval').inputValue(),'1');assert.equal(await page.locator('.toolbar #refresh').count(),1);assert.equal(await page.locator('thead th').count(),9);const widthRatio=await page.locator('main').evaluate(el=>el.getBoundingClientRect().width/window.innerWidth);assert(widthRatio>0.89&&widthRatio<0.91);assert((await page.locator('#rows').textContent()).includes('图里是什么？'));
   const ignored=page.getByLabel('忽略已拒绝条目');
   assert.equal(await ignored.isChecked(),false);
   await ignored.check();
@@ -52,6 +52,9 @@ const assert = require('node:assert/strict');
    await page.locator('[data-close=detail]').click();
   }
   assert(found,'input and model output original images must render');
+  const toolBubble=page.locator('.bubble').filter({hasText:'call_read_image'}).filter({has:page.locator('img.original-image')});
+  assert.equal(await toolBubble.count(),1,'tool JSON image must render as an image in its tool-result bubble');
+  assert(!(await page.locator('#detail-body').textContent()).includes('base64,'),'replay must not display base64 text');
   assert(imageRequests.every(request=>new URL(request.url()).searchParams.get('variant')==='preview'),'opening a conversation must only load WebP previews');
   await page.locator('#detail-body img.original-image').first().click();await page.locator('#image-view').waitFor({state:'visible'});assert((await page.locator('#full-image').getAttribute('src')).startsWith('blob:'));const downloadEvent=page.waitForEvent('download');await page.locator('#image-download').click();const originalDownload=await downloadEvent;assert(originalDownload.suggestedFilename().endsWith('.png'));const originalStream=await originalDownload.createReadStream();const originalChunks=[];for await(const chunk of originalStream)originalChunks.push(chunk);assert.equal(Buffer.concat(originalChunks).toString('base64'),'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==');assert(imageRequests.some(request=>new URL(request.url()).searchParams.get('variant')==='original'));
   await page.locator('[data-close=image-view]').click();

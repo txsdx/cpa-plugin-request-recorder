@@ -839,11 +839,14 @@ table {
 .col-state {
   width: 4.5rem;
 }
+.col-steps {
+  width: 4.75rem;
+}
 .col-timing {
   width: 6.5rem;
 }
 .col-tokens {
-  width: 6rem;
+  width: 7rem;
 }
 
 td {

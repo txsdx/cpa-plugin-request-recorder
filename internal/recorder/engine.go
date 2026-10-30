@@ -387,6 +387,7 @@ func applyUsage(r *Record, u wire.Usage) {
 		cached += read
 	}
 	r.Tokens = &t
+	r.RequestInputTokens = &den
 	r.CacheRatio = nil
 	if den > 0 {
 		ratio := float64(cached) / float64(den)

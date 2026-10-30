@@ -484,7 +484,16 @@ function renderRows(items) {
     );
     if (r.ttft_ms == null && r.first_chunk_ms != null)
       latency.append(el("small", "", `首分片 ${duration(r.first_chunk_ms)}`));
-    const tokens = el("td", "mono", fmt(r.tokens?.TotalTokens));
+    const steps = el("td", "mono", r.conversation_steps == null ? "—" : fmt(r.conversation_steps) + " 步");
+    steps.dataset.conversationSteps = "";
+    steps.title = r.conversation_steps == null ? "打开详情或下一次请求后补充历史条目的步数。" : "用户消息、模型回复、工具调用和工具结果；文字、思考和图片按消息合并计步。";
+    const usage = latestRequestTokens(r);
+    const tokens = el("td", "mono", fmt(usage.total));
+    tokens.dataset.requestTokens = "";
+    tokens.title = "最新一次请求的输入 + 输出总 Token；会话累计见详情标题。";
+    if (usage.input != null || usage.output != null) {
+      tokens.append(el("small", "", `输入 ${fmt(usage.input)}`), el("small", "", `输出 ${fmt(usage.output)}`));
+    }
     tokens.append(el("small", "", `缓存 ${pct(r.cache_ratio)}`));
     if (r.warnings?.length)
       state.append(el("small", "", `△ ${r.warnings.length} 条采集提示`));
@@ -494,10 +503,29 @@ function renderRows(items) {
     response.append(
       el("div", "row-preview", r.latest_response || "点击条目查看模型最终结果"),
     );
-    tr.append(time, who, model, state, latency, tokens, prompt, response);
+    tr.append(time, who, model, state, steps, latency, tokens, prompt, response);
     $("rows").append(tr);
   }
   renderKeyChoices();
+}
+function latestRequestTokens(r) {
+  const t = r.tokens;
+  if (!t) return {};
+  let input = r.request_input_tokens ?? t.InputTokens ?? 0,
+    output = t.OutputTokens ?? 0;
+  // Messages cache buckets are additional input, while OpenAI includes cache
+  // and reasoning in its input/output. Prefer the host's reported total.
+  if (r.request_input_tokens == null && /claude|anthropic/i.test(r.provider || ""))
+    input += (t.CacheReadTokens || 0) + (t.CacheCreationTokens || 0);
+  let total = t.TotalTokens || 0;
+  if (!total) {
+    if (/gemini|vertex/i.test(r.provider || "")) output += t.ReasoningTokens || 0;
+    total = input + output;
+  } else if (input + output > 0 && total >= input + output) {
+    output = total - input;
+  }
+  if (!input && !output && total) return {total};
+  return {input, output, total};
 }
 function renderDetailHeader() {
   if (!detail) return;

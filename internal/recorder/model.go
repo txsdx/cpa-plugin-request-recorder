@@ -14,6 +14,7 @@ type Summary struct {
 	RequestID             string              `json:"request_id"`
 	ConversationStartedAt time.Time           `json:"conversation_started_at"`
 	ConversationTurns     int                 `json:"conversation_turns"`
+	ConversationSteps     *int                `json:"conversation_steps,omitempty"`
 	ConversationTotals    *ConversationTotals `json:"conversation_totals,omitempty"`
 	LatestPrompt          string              `json:"latest_prompt"`
 	LatestResponse        string              `json:"latest_response"`
@@ -46,6 +47,7 @@ type Summary struct {
 	TTFTMS                *float64            `json:"ttft_ms"`
 	FirstChunkMS          *float64            `json:"first_chunk_ms"`
 	Tokens                *wire.Tokens        `json:"tokens"`
+	RequestInputTokens    *int64              `json:"request_input_tokens,omitempty"`
 	CacheRatio            *float64            `json:"cache_ratio"`
 	Warnings              []string            `json:"warnings"`
 }
