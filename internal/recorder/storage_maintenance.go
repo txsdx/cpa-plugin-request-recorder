@@ -59,7 +59,7 @@ func (s *Store) databaseSize() databaseSize {
 	size.Free = int64(stats.FreeAlloc)
 	_ = s.db.View(func(tx *bolt.Tx) error {
 		size.Used = tx.Size() - size.Free
-		size.Records = tx.Bucket(summaries).Stats().KeyN
+		size.Records = int(readCatalogCounts(tx).total)
 		if value := tx.Bucket(storageMeta).Get([]byte("capacity_evicted")); len(value) == 8 {
 			size.Evicted = binary.BigEndian.Uint64(value)
 		}
@@ -187,6 +187,9 @@ func (s *Store) enforceCapacity() error {
 	return nil
 }
 func removeStoredRecord(tx *bolt.Tx, id []byte, summary Summary) error {
+	if err := updateCatalogCounts(tx, &summary, nil); err != nil {
+		return err
+	}
 	if err := clearConversationKeys(tx, id); err != nil {
 		return err
 	}

@@ -235,7 +235,7 @@ func (a *imageArchive) process(id string) bool {
 	force := a.retries[id]
 	delete(a.retries, id)
 	a.jobsMu.Unlock()
-	r, err := a.store.Get(id)
+	r, err := a.store.getConversation(id)
 	if err != nil {
 		return false
 	}

@@ -34,6 +34,7 @@ type mutationJournal struct {
 	overflow   bool
 }
 type Store struct {
+	catalog              catalogCache
 	mu                   sync.RWMutex
 	writes               sync.Mutex
 	maintenance          sync.Mutex
@@ -68,6 +69,9 @@ func Open(path string) (*Store, error) {
 			if _, e := tx.CreateBucketIfNotExists(name); e != nil {
 				return e
 			}
+		}
+		if err := initializeCatalogCounts(tx); err != nil {
+			return err
 		}
 		return tx.Bucket(storageMeta).Put([]byte("record_layout"), []byte("conversation-v1"))
 	})
@@ -184,11 +188,13 @@ func (s *Store) Save(input *Record) error {
 				return err
 			}
 		}
+		var before *Summary
 		if old := tx.Bucket(summaries).Get(id); old != nil {
 			var o Summary
 			if err := json.Unmarshal(old, &o); err != nil {
 				return err
 			}
+			before = &o
 			if err := tx.Bucket(ordering).Delete(orderKey(o)); err != nil {
 				return err
 			}
@@ -236,7 +242,10 @@ func (s *Store) Save(input *Record) error {
 		if err := saveConversationKeys(tx, r, keys); err != nil {
 			return err
 		}
-		return tx.Bucket(ordering).Put(orderKey(r.Summary), id)
+		if err := tx.Bucket(ordering).Put(orderKey(r.Summary), id); err != nil {
+			return err
+		}
+		return updateCatalogCounts(tx, before, &r.Summary)
 	})
 	if err == nil {
 		*input = snapshot
@@ -244,6 +253,12 @@ func (s *Store) Save(input *Record) error {
 	return err
 }
 func (s *Store) Get(id string) (*Record, error) {
+	return s.getRecord(id, false)
+}
+func (s *Store) getConversation(id string) (*Record, error) {
+	return s.getRecord(id, true)
+}
+func (s *Store) getRecord(id string, historyOnly bool) (*Record, error) {
 	var r *Record
 	err := s.view(func(tx *bolt.Tx) error {
 		b := tx.Bucket(records).Get([]byte(id))
@@ -257,7 +272,7 @@ func (s *Store) Get(id string) (*Record, error) {
 			return ErrNotFound
 		}
 		var err error
-		r, err = decodeStoredRecord(tx, b)
+		r, err = decodeStoredRecordBodies(tx, b, historyOnly)
 		if err != nil {
 			return err
 		}
@@ -287,14 +302,24 @@ type Page struct {
 }
 
 func (s *Store) List(f Filter) (Page, error) {
-	if f.Limit <= 0 || f.Limit > 200 {
-		f.Limit = 50
-	}
-	if f.Offset < 0 {
-		f.Offset = 0
-	}
-	p := Page{Items: []Summary{}, Offset: f.Offset, Limit: f.Limit}
+	f = normalizeFilter(f)
+	var p Page
 	err := s.view(func(tx *bolt.Tx) error {
+		var err error
+		p, err = listCatalog(tx, f)
+		return err
+	})
+	return p, err
+}
+
+func listCatalog(tx *bolt.Tx, f Filter) (Page, error) {
+	p := Page{Items: []Summary{}, Offset: f.Offset, Limit: f.Limit}
+	total, fast := fastCatalogTotal(tx, f)
+	if fast && f.Offset >= total {
+		p.Total = total
+		return p, nil
+	}
+	err := func() error {
 		c := tx.Bucket(ordering).Cursor()
 		for k, v := c.Last(); k != nil; k, v = c.Prev() {
 			var r Summary
@@ -321,19 +346,27 @@ func (s *Store) List(f Filter) (Page, error) {
 					break
 				}
 			}
-			if !match || !contains(strings.Join([]string{r.ID, r.TraceID, r.KeyAlias, r.KeyHint, r.KeyID, r.CallerScope, r.Model, r.RequestedModel, r.ResponseModel, r.Provider, r.SessionID, r.ClientSessionID, r.UserAgent, r.LatestPrompt, r.LatestResponse}, " "), f.Query) {
+			if !match || f.Query != "" && !contains(strings.Join([]string{r.ID, r.TraceID, r.KeyAlias, r.KeyHint, r.KeyID, r.CallerScope, r.Model, r.RequestedModel, r.ResponseModel, r.Provider, r.SessionID, r.ClientSessionID, r.UserAgent, r.LatestPrompt, r.LatestResponse}, " "), f.Query) {
 				continue
 			}
 			if p.Total >= f.Offset && len(p.Items) < f.Limit {
 				p.Items = append(p.Items, r)
 			}
 			p.Total++
+			if fast && len(p.Items) == f.Limit {
+				break
+			}
 		}
 		return nil
-	})
+	}()
+	if fast {
+		p.Total = total
+	}
 	return p, err
 }
-func contains(s, q string) bool { return strings.Contains(strings.ToLower(s), strings.ToLower(q)) }
+func contains(s, q string) bool {
+	return q == "" || strings.Contains(strings.ToLower(s), strings.ToLower(q))
+}
 func (s *Store) SetAlias(id, alias string) error {
 	_, decodeErr := hex.DecodeString(id)
 	if len(id) != 64 || decodeErr != nil {
@@ -343,6 +376,9 @@ func (s *Store) SetAlias(id, alias string) error {
 		return errors.New("alias too long")
 	}
 	return s.update(0, func(tx *bolt.Tx) error {
+		if err := invalidateCatalog(tx); err != nil {
+			return err
+		}
 		if alias == "" {
 			return tx.Bucket(aliases).Delete([]byte(id))
 		}
@@ -531,6 +567,9 @@ func (s *Store) SyncPanelAliases(input map[string]string) error {
 		cost += len(k) + len(v)
 	}
 	return s.update(cost, func(tx *bolt.Tx) error {
+		if err := invalidateCatalog(tx); err != nil {
+			return err
+		}
 		if err := tx.DeleteBucket(panelAliases); err != nil {
 			return err
 		}

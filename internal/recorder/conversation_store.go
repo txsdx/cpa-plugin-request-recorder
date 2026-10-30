@@ -112,7 +112,6 @@ func (s *Store) prepareConversation(r *Record) ([]string, error) {
 	}
 	previousResponseID := str(decode(r.RequestBody)["previous_response_id"])
 	linked := false
-	points := contextPoints(input)
 	session := clientConversationID(r)
 	r.ClientSessionID = session
 	parentSession, fork := parentConversationIdentity(r, session)
@@ -122,16 +121,38 @@ func (s *Store) prepareConversation(r *Record) ([]string, error) {
 	if r.CallerScope != "" {
 		scope = "caller:" + r.CallerScope
 	}
-	namespace := scope + "/config:" + contextConfiguration(r)
+	var points []contextPoint
+	var namespace string
+	contextIndex := func() {
+		if namespace == "" {
+			namespace = scope + "/config:" + contextConfiguration(r)
+			points = contextPoints(input)
+		}
+	}
 	keys := []string{}
 	var previous, parent *Record
 	err := s.view(func(tx *bolt.Tx) error {
-		id := r.ID
-		if raw := tx.Bucket(records).Get([]byte(id)); raw != nil {
-			old, err := decodeStoredRecord(tx, raw)
-			if err != nil {
-				return err
+		decoded := map[string]*Record{}
+		load := func(id string) (*Record, error) {
+			if found, ok := decoded[id]; ok {
+				return found, nil
 			}
+			raw := tx.Bucket(records).Get([]byte(id))
+			if raw == nil {
+				return nil, nil
+			}
+			found, err := decodeStoredRecord(tx, raw)
+			if err == nil {
+				decoded[id] = found
+			}
+			return found, err
+		}
+		id := r.ID
+		old, err := load(id)
+		if err != nil {
+			return err
+		}
+		if old != nil {
 			if old.RequestID == r.RequestID || old.RequestID == "" && old.ID == r.RequestID {
 				previous = old
 			}
@@ -144,11 +165,7 @@ func (s *Store) prepareConversation(r *Record) ([]string, error) {
 			if value == nil {
 				return nil, nil
 			}
-			raw := tx.Bucket(records).Get(value)
-			if raw == nil {
-				return nil, nil
-			}
-			return decodeStoredRecord(tx, raw)
+			return load(string(value))
 		}
 		if session != "" {
 			found, err := read(contextKey(scope, "session", session))
@@ -191,6 +208,7 @@ func (s *Store) prepareConversation(r *Record) ([]string, error) {
 			}
 		}
 		if previous == nil && !branchCandidate {
+			contextIndex()
 			lookup := func(kind, digest string) (bool, error) {
 				found, err := read(contextKey(namespace, kind, digest))
 				if err != nil || found == nil {
@@ -327,6 +345,7 @@ func (s *Store) prepareConversation(r *Record) ([]string, error) {
 		if session != "" {
 			keys = append(keys, contextKey(scope, "session", session))
 		} else {
+			contextIndex()
 			if len(points) > 0 {
 				keys = append(keys, contextKey(namespace, "input", points[len(points)-1].digest))
 			}

@@ -43,7 +43,10 @@ func (s *Store) addDelayedUsage(conversationID, executionID string, delta int64,
 		if err = tx.Bucket(records).Put(id, next); err != nil {
 			return err
 		}
-		return tx.Bucket(summaries).Put(id, summary)
+		if err := tx.Bucket(summaries).Put(id, summary); err != nil {
+			return err
+		}
+		return invalidateCatalog(tx)
 	})
 	if errors.Is(err, errUsageStillCurrent) {
 		return true, nil

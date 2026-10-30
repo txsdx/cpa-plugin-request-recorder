@@ -17,7 +17,7 @@ const APIBase = "/v0/management/plugins/" + PluginID
 const ResourceBase = "/v0/resource/plugins/" + PluginID
 
 // Version is injected from the validated release tag by the build.
-var Version = "0.8.1"
+var Version = "0.8.2"
 
 func Registration() map[string]any {
 	return map[string]any{"schema_version": 6, "metadata": map[string]any{
@@ -60,6 +60,9 @@ func result(code int, v any) wire.ManagementResponse {
 		code = 500
 		b = []byte(`{"error":"encode failed"}`)
 	}
+	return jsonResult(code, b)
+}
+func jsonResult(code int, b []byte) wire.ManagementResponse {
 	return wire.ManagementResponse{StatusCode: code, Headers: http.Header{"Content-Type": {"application/json; charset=utf-8"}, "Cache-Control": {"no-store"}, "X-Content-Type-Options": {"nosniff"}}, Body: b}
 }
 
@@ -122,13 +125,14 @@ func (e *Engine) Management(req wire.ManagementRequest, web fs.FS) wire.Manageme
 			f.Offset, _ = strconv.Atoi(q.Get("offset"))
 			f.Limit, _ = strconv.Atoi(q.Get("limit"))
 			f.MinDuration, _ = strconv.ParseFloat(q.Get("min_duration"), 64)
-			p, err := e.List(f)
+			body, err := e.store.listJSON(f)
 			if err != nil {
 				return result(500, map[string]string{"error": "database read failed"})
 			}
-			return result(200, p)
+			return jsonResult(200, body)
 		case "/record":
-			r, err := e.Get(req.Query.Get("id"))
+			chatOnly := req.Query.Get("view") == "chat"
+			r, err := e.store.getRecord(req.Query.Get("id"), chatOnly)
 			if errors.Is(err, ErrNotFound) {
 				return result(404, map[string]string{"error": "record not found"})
 			}
@@ -151,7 +155,7 @@ func (e *Engine) Management(req wire.ManagementRequest, web fs.FS) wire.Manageme
 				}
 			}
 			e.images.decorate(messages, r.Images)
-			if req.Query.Get("view") == "chat" {
+			if chatOnly {
 				// Base64 originals must not travel in hidden raw fields when the
 				// browser only needs the conversation and WebP thumbnails.
 				for _, body := range recordBodyFields(r) {

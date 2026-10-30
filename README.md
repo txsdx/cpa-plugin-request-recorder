@@ -31,15 +31,15 @@ CLIProxyAPI 的原生插件：在模型请求结束后更新完整会话，在 *
 
 Linux 包在 Debian 12 / glibc 环境原生编译，匹配所检查 CPA Dockerfile 的系统基线；Alpine / musl 和 Windows ARM64 不包含在这五种发布目标中。Docker 部署应按 **容器内部** 的 OS / 架构选择，不是按浏览器或宿主桌面系统选择。
 
-以 Linux amd64 `v0.8.1` 为例：
+以 Linux amd64 `v0.8.2` 为例：
 
-1. 下载 `request-recorder_0.8.1_linux_amd64.zip` 和 `checksums.txt`，放在同一目录。
+1. 下载 `request-recorder_0.8.2_linux_amd64.zip` 和 `checksums.txt`，放在同一目录。
 2. 校验并解压到 CPA 的插件目录：
 
    ```bash
    sha256sum --ignore-missing --check checksums.txt
    mkdir -p /path/to/CLIProxyAPI/plugins/linux/amd64
-   unzip request-recorder_0.8.1_linux_amd64.zip -d /path/to/CLIProxyAPI/plugins/linux/amd64
+   unzip request-recorder_0.8.2_linux_amd64.zip -d /path/to/CLIProxyAPI/plugins/linux/amd64
    ```
 
 3. 合并下面的插件配置，设置数据库持久化，然后重启 CPA。无需配置日志目录。
@@ -93,7 +93,7 @@ plugins:
     - "https://raw.githubusercontent.com/txsdx/cpa-plugin-request-recorder/main/registry.json"
 ```
 
-刷新商店，选择 `CPA Request Recorder · 请求记录`，点击安装。以后刷新检查更新，再点击更新即可。CPA 从仓库的**最新正式 Release**解析版本，自动选择 OS / CPU 对应 zip，校验 `checksums.txt`，并写入带版本的库文件（例如 `plugins/linux/amd64/request-recorder-v0.8.1.so`）。不要为了匹配版本再手动重命名 Release 的 zip 或库。
+刷新商店，选择 `CPA Request Recorder · 请求记录`，点击安装。以后刷新检查更新，再点击更新即可。CPA 从仓库的**最新正式 Release**解析版本，自动选择 OS / CPU 对应 zip，校验 `checksums.txt`，并写入带版本的库文件（例如 `plugins/linux/amd64/request-recorder-v0.8.2.so`）。不要为了匹配版本再手动重命名 Release 的 zip 或库。
 
 安装源解决的是下载安装和版本更新。仍需按本文配置数据库持久化；GUI 通过 CPAMC 插件资源打开。更新是否热加载或要求重启由 CPA 版本及运行平台决定。预发布版本不会被 GitHub latest 接口当作正式更新推送。
 
@@ -334,6 +334,18 @@ GUI 的 **存储占用** 区分活动文件、空闲页、正文合计、去重�
 | `POST /aliases` | `{"key_id":"sha256…","alias":"开发机"}` 或 `{"key":"临时提交原 key","alias":"开发机"}`；空别名删除映射 |
 
 列表参数：`q`、`key_id`、`alias`、`model`、`provider`、`outcome`、`session`、`reasoning`、`from` / `to`（RFC3339）、`min_duration`（毫秒）、`ignore_rejected`（true / false，省略时使用已保存偏好）、`offset`、`limit`（默认 50，上限 200）。结果为 `{items,total,offset,limit}`。`q` 搜索摘要字段，不扫描完整正文。
+
+## 性能与内存
+
+v0.8.2 优化默认每秒刷新的列表：总数与“忽略已拒绝”计数随记录事务更新，首屏只读取当前页；未变化的同一筛选复用一份最多 1 MiB 的摘要 JSON。新请求、用量更正、备注变化和清理会立即使缓存失效，不增加更新等待时间。图片进度、设置保存不会使同一摘要页失效。全文搜索或复杂筛选在数据变化后仍需扫描摘要，不扫描完整对话正文。
+
+正文按需加载：回放与图片归档只解压完整会话；查看原文 / 导出仍读取所需原文。解压器复用，正文缓冲区按长度预分配；一次会话匹配中不重复解压相同记录，有明确会话 ID 时按需计算上下文索引。文字、思考、工具与原图保留规则不变。
+
+在同一测试机的合成基准中，1 万条记录的未缓存首屏读取从约 272 ms / 45 MiB 临时分配降到约 2.2 ms / 236 KiB；未变化页的重复刷新约 0.07 ms / 106 KiB。约 2 MiB 会话回放的临时分配从约 55 MiB 降到约 27 MiB。方法、基线和限制见 [性能基准](docs/performance.md)。这些是单次操作的耗时 / 累计分配，不是你的 CPA 常驻内存测量。
+
+`max_memory_bytes` 默认 256 MiB，仅限制正在采集的正文预算，不是整个插件或 CPA 进程 RSS 的硬上限；不会启动就预分配满。长上下文合并、压缩 / JSON 临时对象、Go 运行时、数据库映射页和图片处理另计。WebP 压缩预览缓存上限 32 MiB / 64 项，一次只转换一张预览；默认图片下载并发 2。大图首次解码和长会话结束时仍会出现 CPU / 内存峰值。浏览器关闭或未登录不会停止后台采集；没有请求、清理或图片任务时，后台只做轻量定时维护。
+
+首次打开现有会话数据库会从摘要建立一次计数索引，不读取或迁移正文；无需删除现有数据库。
 
 ## 开发与验证
 

@@ -70,6 +70,13 @@ var bodyGzipWriters = sync.Pool{New: func() any {
 	return w
 }}
 
+type bodyGzipReader struct {
+	buffer bytes.Reader
+	reader gzip.Reader
+}
+
+var bodyGzipReaders = sync.Pool{New: func() any { return &bodyGzipReader{} }}
+
 // Each chunk is at most 64 KiB. Use raw bytes when compression would expand it.
 // Five-byte header: codec (0/raw, 1/gzip) and decoded length (big endian).
 func encodeBodyChunk(body string) ([]byte, error) {
@@ -105,15 +112,31 @@ func decodeBodyChunk(id string, data []byte) (string, error) {
 	}
 	body := data[5:]
 	if data[0] == 1 {
-		r, err := gzip.NewReader(bytes.NewReader(body))
-		if err != nil {
+		r := bodyGzipReaders.Get().(*bodyGzipReader)
+		r.buffer.Reset(body)
+		if err := r.reader.Reset(&r.buffer); err != nil {
 			return "", errors.New("invalid compressed body chunk")
 		}
-		body, err = io.ReadAll(io.LimitReader(r, int64(size)+1))
-		r.Close()
-		if err != nil {
+		// The extra byte detects expansion beyond the manifest and forces gzip
+		// to validate its trailer/CRC, even for an exactly sized payload.
+		decoded := make([]byte, size+1)
+		n := 0
+		var err error
+		for n < len(decoded) {
+			var read int
+			read, err = r.reader.Read(decoded[n:])
+			n += read
+			if err != nil {
+				break
+			}
+		}
+		_ = r.reader.Close()
+		r.buffer.Reset(nil) // pooled readers must never retain a transaction's mmap
+		bodyGzipReaders.Put(r)
+		if err != nil && err != io.EOF {
 			return "", errors.New("body chunk decompression failed")
 		}
+		body = decoded[:n]
 	} else if data[0] != 0 {
 		return "", errors.New("unsupported body chunk codec")
 	}
@@ -166,6 +189,10 @@ func storedChunkIDs(raw []byte) (map[string]bool, error) {
 	return ids, nil
 }
 func decodeStoredRecord(tx *bolt.Tx, raw []byte) (*Record, error) {
+	return decodeStoredRecordBodies(tx, raw, false)
+}
+
+func decodeStoredRecordBodies(tx *bolt.Tx, raw []byte, historyOnly bool) (*Record, error) {
 	var stored storedRecord
 	if err := json.Unmarshal(raw, &stored); err != nil {
 		return nil, err
@@ -174,7 +201,11 @@ func decodeStoredRecord(tx *bolt.Tx, raw []byte) (*Record, error) {
 		return nil, errors.New("unsupported record storage version")
 	}
 	fields := recordBodyFields(&stored.Record)
+	_, hasHistory := stored.Bodies["conversation_history"]
 	for name, field := range fields {
+		if historyOnly && hasHistory && name != "conversation_history" {
+			continue
+		}
 		manifest, exists := stored.Bodies[name]
 		if !exists {
 			continue
@@ -183,6 +214,9 @@ func decodeStoredRecord(tx *bolt.Tx, raw []byte) (*Record, error) {
 			return nil, errors.New("invalid body manifest")
 		}
 		var body strings.Builder
+		// Avoid repeated whole-body growth/copying while bounding speculative
+		// allocation when a locally damaged manifest is rejected below.
+		body.Grow(min(manifest.Size, 8<<20))
 		for _, id := range manifest.Chunks {
 			if !validSHA256(id) {
 				return nil, errors.New("invalid body reference")
