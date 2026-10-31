@@ -866,7 +866,8 @@ td {
 }
 
 .toolbar .auto,
-.toolbar .refresh-period {
+.toolbar .refresh-period,
+#login .auto {
   flex-direction: row;
   white-space: nowrap;
 }

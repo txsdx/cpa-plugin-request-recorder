@@ -1,8 +1,9 @@
 "use strict";
 const $ = (id) => document.getElementById(id);
 const API = "/v0/management/plugins/request-recorder";
+const SAVED_LOGIN_KEY = "request-recorder:connection:v1";
 let managementKey = "",
-  keyFromPanel = false,
+  authSource = "",
   authGeneration = 0,
   offset = 0,
   total = 0,
@@ -75,12 +76,12 @@ async function api(path, options = {}) {
     } catch {}
     if (r.status === 401 || r.status === 403)
       error = "管理鉴权失败，请检查 CPA 管理密钥和 remote-management 设置。";
-    throw new Error(error);
+    throw Object.assign(new Error(error), { status: r.status });
   }
   return r.json();
 }
 // CPAMC stores its remembered login and per-server key names in same-origin
-// localStorage. Read only these known keys; never persist another credential copy.
+// localStorage. Read only known keys; manual credentials use a separate opt-in key.
 function panelStoredValue(name) {
   let raw = localStorage.getItem(name);
   if (raw === null) return null;
@@ -89,7 +90,7 @@ function panelStoredValue(name) {
   if (prefix) {
     const scope =
       prefix[1] === "2"
-        ? "v2|" + location.host
+        ? location.host
         : location.host + "|" + navigator.userAgent;
     const secret = new TextEncoder().encode(
       "cli-proxy-api-webui::secure-storage|" + scope,
@@ -107,6 +108,41 @@ function panelStoredValue(name) {
       return raw;
     throw error;
   }
+}
+function savedConnection() {
+  try {
+    const saved = panelStoredValue(SAVED_LOGIN_KEY);
+    if (
+      saved?.version === 1 &&
+      saved.apiBase === location.origin &&
+      typeof saved.managementKey === "string" &&
+      saved.managementKey.trim()
+    )
+      return saved.managementKey.trim();
+  } catch {}
+  return "";
+}
+function rememberConnection(key) {
+  // Match CPAMC's current reversible obfuscation, not cryptographic protection.
+  const bytes = new TextEncoder().encode(
+    JSON.stringify({ version: 1, apiBase: location.origin, managementKey: key }),
+  );
+  const secret = new TextEncoder().encode(
+    "cli-proxy-api-webui::secure-storage|" + location.host,
+  );
+  let binary = "";
+  for (let i = 0; i < bytes.length; i++)
+    binary += String.fromCharCode(bytes[i] ^ secret[i % secret.length]);
+  localStorage.setItem(SAVED_LOGIN_KEY, "enc::v2::" + btoa(binary));
+}
+function showLogin() {
+  if ($("login").open) return;
+  const saved = Boolean(savedConnection());
+  $("remember-key").checked = saved;
+  $("forget-key").hidden = !saved;
+  $("management-key").value = "";
+  $("login-error").textContent = "";
+  $("login").showModal();
 }
 function panelConnection() {
   try {
@@ -256,34 +292,66 @@ async function syncPanelAliases(force = false) {
     });
   return panelSyncPromise;
 }
+async function connectWithKey(key, source) {
+  clearAuthenticatedView();
+  managementKey = key;
+  authSource = source;
+  const revision = authGeneration;
+  refreshRequests++;
+  try {
+    await api("/status"); // The host validates every restored or entered key.
+    if (revision !== authGeneration) return false;
+    await refresh();
+    return revision === authGeneration;
+  } catch (error) {
+    if (revision !== authGeneration) return false;
+    managementKey = "";
+    authSource = "";
+    clearAuthenticatedView();
+    throw error;
+  } finally {
+    refreshRequests--;
+  }
+}
 async function connectFromPanel() {
   const panel = panelConnection();
   if (!panel?.key) {
-    if (keyFromPanel) {
+    if (authSource === "panel") {
       managementKey = "";
-      keyFromPanel = false;
+      authSource = "";
       clearAuthenticatedView();
       notice("CPAMC 登录凭据已移除。后台仍在记录；查看记录需要重新登录。");
     }
     return false;
   }
-  if (managementKey !== panel.key) clearAuthenticatedView();
-  managementKey = panel.key;
-  keyFromPanel = true;
+  if (authSource === "panel" && managementKey === panel.key) return true;
   try {
-    await api("/status"); // The host validates the borrowed key before any data access.
-    if (managementKey !== panel.key) return false;
-    await syncPanelAliases(true);
-    await refresh();
+    if (!(await connectWithKey(panel.key, "panel"))) return false;
     if ($("login").open) $("login").close();
     return true;
   } catch {
-    if (managementKey !== panel.key) return false;
-    managementKey = "";
-    keyFromPanel = false;
-    clearAuthenticatedView();
     notice("无法复用 CPAMC 登录，请使用管理密钥连接。后台记录不受影响。");
     return false;
+  }
+}
+async function restoreConnection() {
+  if (await connectFromPanel()) return;
+  // A manual login started while panel validation was pending takes precedence.
+  if (managementKey) return;
+  const key = savedConnection();
+  if (!key) return;
+  try {
+    if (await connectWithKey(key, "saved")) {
+      if ($("login").open) $("login").close();
+    }
+  } catch (error) {
+    if (error.status === 401 || error.status === 403) {
+      try {
+        if (savedConnection() === key) localStorage.removeItem(SAVED_LOGIN_KEY);
+      } catch {}
+    }
+    showLogin();
+    $("login-error").textContent = "已保存密钥无法连接：" + error.message;
   }
 }
 function clearAuthenticatedView() {
@@ -293,6 +361,9 @@ function clearAuthenticatedView() {
   detail = null;
   callerKeysById.clear();
   callerKeysFor = "";
+  panelSnapshot = "";
+  panelMessage = "";
+  panelSyncAt = 0;
   $("caller-keys").replaceChildren();
   if ($("detail").open) $("detail").close();
   lastRowsSignature = "";
@@ -324,7 +395,7 @@ async function filterQuery() {
 }
 async function refresh() {
   if (!managementKey) {
-    $("login").showModal();
+    showLogin();
     return;
   }
   const seq = ++generation;
@@ -1096,7 +1167,7 @@ function renderDetail(preserveScroll = false) {
 }
 $("storage-open").onclick = async () => {
   if (!managementKey) {
-    $("login").showModal();
+    showLogin();
     return;
   }
   const revision = authGeneration;
@@ -1141,7 +1212,7 @@ $("storage-open").onclick = async () => {
       body.replaceChildren(el("p", "error", error.message));
   }
 };
-$("login-open").onclick = () => $("login").showModal();
+$("login-open").onclick = showLogin;
 $("refresh").onclick = async () => {
   await loadCallerKeys(true);
   await refresh().catch(() => {});
@@ -1152,16 +1223,52 @@ $("alias-open").onclick = () => {
 };
 $("login-form").onsubmit = async (e) => {
   e.preventDefault();
-  clearAuthenticatedView();
-  keyFromPanel = false;
-  managementKey = $("management-key").value.trim();
+  const key = $("management-key").value.trim();
+  if (!key) return;
+  const remember = $("remember-key").checked;
   $("management-key").value = "";
   $("login-error").textContent = "";
+  let storageError = "";
   try {
-    await refresh();
+    // Unchecking also removes a previously remembered key, even if login fails.
+    if (!remember) localStorage.removeItem(SAVED_LOGIN_KEY);
+  } catch {
+    storageError = "已连接，但浏览器无法移除已保存密钥，请清除此站点的浏览器数据。";
+  }
+  try {
+    if (!(await connectWithKey(key, "manual"))) return;
+    if (remember) {
+      try {
+        rememberConnection(key);
+        authSource = "saved";
+        $("forget-key").hidden = false;
+      } catch {
+        $("login-error").textContent = "已连接，但浏览器无法保存密钥；关闭此窗口可继续使用。";
+        return;
+      }
+    }
+    if (storageError) {
+      $("login-error").textContent = storageError;
+      return;
+    }
     $("login").close();
   } catch (err) {
     $("login-error").textContent = err.message;
+  }
+};
+$("forget-key").onclick = () => {
+  try {
+    localStorage.removeItem(SAVED_LOGIN_KEY);
+    $("remember-key").checked = false;
+    $("forget-key").hidden = true;
+    if (authSource === "saved") {
+      managementKey = "";
+      authSource = "";
+      clearAuthenticatedView();
+    }
+    $("login-error").textContent = "已忘记插件保存的密钥。CPAMC 的登录状态不受影响。";
+  } catch {
+    $("login-error").textContent = "浏览器无法移除已保存密钥，请清除此站点的浏览器数据。";
   }
 };
 $("alias-form").onsubmit = async (e) => {
@@ -1304,7 +1411,7 @@ $("ignore-rejected").onchange = async () => {
     revision = authGeneration;
   if (!managementKey) {
     checkbox.checked = !checked;
-    $("login").showModal();
+    showLogin();
     return;
   }
   checkbox.disabled = true;
@@ -1333,7 +1440,7 @@ $("refresh-interval").onchange = async () => {
     return;
   }
   if (!managementKey) {
-    $("login").showModal();
+    showLogin();
     return;
   }
   try {
@@ -1349,18 +1456,33 @@ $("refresh-interval").onchange = async () => {
 };
 scheduleRefresh();
 
-// Storage events are emitted in this iframe when CPAMC edits its saved notes.
+// Storage events are emitted across same-origin tabs/iframes, including clear().
 let panelStorageTimer;
 window.addEventListener("storage", (event) => {
+  if (event.storageArea !== localStorage) return;
   if (
+    event.key === null ||
     event.key === "cli-proxy-auth" ||
+    event.key === "managementKey" ||
+    event.key === "apiBase" ||
+    event.key === "apiUrl" ||
+    event.key === SAVED_LOGIN_KEY ||
     event.key?.startsWith("api-key-names:v1:")
   ) {
     clearTimeout(panelStorageTimer);
     panelStorageTimer = setTimeout(async () => {
-      if (event.key === "cli-proxy-auth") {
+      if (!event.key?.startsWith("api-key-names:v1:")) {
         panelSnapshot = "";
-        if (keyFromPanel || !managementKey) await connectFromPanel();
+        if (authSource === "panel") await connectFromPanel();
+        else if (authSource === "saved") {
+          const key = savedConnection();
+          if (key !== managementKey) {
+            managementKey = "";
+            authSource = "";
+            clearAuthenticatedView();
+            if (key) await restoreConnection();
+          }
+        } else if (!managementKey) await restoreConnection();
       } else if (managementKey) {
         await syncPanelAliases(true);
         await refresh().catch(() => {});
@@ -1368,7 +1490,7 @@ window.addEventListener("storage", (event) => {
     }, 200);
   }
 });
-connectFromPanel();
+restoreConnection();
 $("detail").addEventListener("close", () => {
   detailGeneration++;
   clearDetailImages();

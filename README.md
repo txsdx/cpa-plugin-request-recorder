@@ -31,15 +31,15 @@ CLIProxyAPI 的原生插件：在模型请求结束后更新完整会话，在 *
 
 Linux 包在 Debian 12 / glibc 环境原生编译，匹配所检查 CPA Dockerfile 的系统基线；Alpine / musl 和 Windows ARM64 不包含在这五种发布目标中。Docker 部署应按 **容器内部** 的 OS / 架构选择，不是按浏览器或宿主桌面系统选择。
 
-以 Linux amd64 `v0.8.2` 为例：
+以 Linux amd64 `v0.8.3` 为例：
 
-1. 下载 `request-recorder_0.8.2_linux_amd64.zip` 和 `checksums.txt`，放在同一目录。
+1. 下载 `request-recorder_0.8.3_linux_amd64.zip` 和 `checksums.txt`，放在同一目录。
 2. 校验并解压到 CPA 的插件目录：
 
    ```bash
    sha256sum --ignore-missing --check checksums.txt
    mkdir -p /path/to/CLIProxyAPI/plugins/linux/amd64
-   unzip request-recorder_0.8.2_linux_amd64.zip -d /path/to/CLIProxyAPI/plugins/linux/amd64
+   unzip request-recorder_0.8.3_linux_amd64.zip -d /path/to/CLIProxyAPI/plugins/linux/amd64
    ```
 
 3. 合并下面的插件配置，设置数据库持久化，然后重启 CPA。无需配置日志目录。
@@ -93,7 +93,7 @@ plugins:
     - "https://raw.githubusercontent.com/txsdx/cpa-plugin-request-recorder/main/registry.json"
 ```
 
-刷新商店，选择 `CPA Request Recorder · 请求记录`，点击安装。以后刷新检查更新，再点击更新即可。CPA 从仓库的**最新正式 Release**解析版本，自动选择 OS / CPU 对应 zip，校验 `checksums.txt`，并写入带版本的库文件（例如 `plugins/linux/amd64/request-recorder-v0.8.2.so`）。不要为了匹配版本再手动重命名 Release 的 zip 或库。
+刷新商店，选择 `CPA Request Recorder · 请求记录`，点击安装。以后刷新检查更新，再点击更新即可。CPA 从仓库的**最新正式 Release**解析版本，自动选择 OS / CPU 对应 zip，校验 `checksums.txt`，并写入带版本的库文件（例如 `plugins/linux/amd64/request-recorder-v0.8.3.so`）。不要为了匹配版本再手动重命名 Release 的 zip 或库。
 
 安装源解决的是下载安装和版本更新。仍需按本文配置数据库持久化；GUI 通过 CPAMC 插件资源打开。更新是否热加载或要求重启由 CPA 版本及运行平台决定。预发布版本不会被 GitHub latest 接口当作正式更新推送。
 
@@ -179,9 +179,13 @@ plugins:
 
 **后台记录不依赖 WebUI 登录。** 插件启用后持续采集，管理密钥仅用于记录、图片和别名等管理 API 的访问鉴权。
 
-自 v0.2.0 起，同源 CPAMC 已选择记住登录凭据时，插件自动读取它已有的登录状态，通过 CPA 校验后连接，无需再输入；不会另存一份密钥。这里复用已有凭据，服务端鉴权始终保留。参考了 CPA Key Billing 的同源凭据读取方式。不同域名 / 端口 / 协议、CPAMC 未记住密钥、浏览器禁用存储或存储格式不兼容时，显示手动连接入口。CPAMC 不提供通用 postMessage 凭据桥接，不能仅凭 iframe / Referer 判定已授权。
+同源 CPAMC 已选择记住登录凭据时，插件自动读取已有凭据，通过 CPA 校验后连接，无需再输入，也不复制保存 CPAMC 密钥。v0.8.3 修复当前 CPAMC `enc::v2::` 的 host 混淆算法，保留旧版 `enc::v1::` 和已知旧存储键的读取。不同域名 / 端口 / 协议、CPAMC 未记住密钥、浏览器禁用存储时，可点击“连接管理 API”手动输入。CPAMC 不提供通用 postMessage 凭据桥接，不能仅凭 iframe / Referer 判定已授权。
 
-静态 GUI 资源公开，所有记录、原图和别名 API 由 CPA 管理鉴权保护。CPAMC 移除保存的登录凭据时，使用自动登录的插件视图清空并停止读取；这不会停止后台采集。
+手动连接默认不保存密钥；勾选 **“记住密钥，下次自动登录”** 后，仅在鉴权和列表加载成功后保存到当前浏览器、当前站点的独立 `request-recorder:connection:v1` 项，不改写 CPAMC 的登录数据。下次打开先尝试 CPAMC 凭据，再尝试插件保存的密钥；两者均需 CPA 鉴权。取消勾选并连接会移除之前保存的插件密钥，也可在连接窗口点击 **“忘记插件保存的密钥”**；若当前正使用该密钥，立即清空记录并断开。恢复登录遇到 401 / 403 会移除失效的插件密钥，临时网络或服务错误则保留供下次重试。浏览器拒绝保存时仍可手动临时连接。
+
+记住的密钥采用与当前 CPAMC 一致的可逆混淆，**不是加密保护**；同源脚本或有浏览器数据访问权限的人仍可读取，应仅在可信设备上勾选。保存内容包含当前 CPA 来源，跨来源不尝试使用。TLS 传输和 CPA 服务端鉴权保持不变。
+
+静态 GUI 资源公开，所有记录、原图和别名 API 由 CPA 管理鉴权保护。CPAMC 移除保存的登录凭据时，使用 CPAMC 自动登录的插件视图清空并停止读取；插件保存密钥被其他标签页移除或站点存储被清空时，相应自动登录视图也会断开。这些操作不会停止后台采集。
 
 ### 自动读取 CPAMC 的 API key 备注
 
@@ -386,9 +390,10 @@ CHROMIUM_PATH=/usr/bin/chromium npm run test:browser
 CHROMIUM_PATH=/usr/bin/chromium npm run test:detail
 CHROMIUM_PATH=/usr/bin/chromium npm run test:sessions
 CHROMIUM_PATH=/usr/bin/chromium npm run test:panel
+CHROMIUM_PATH=/usr/bin/chromium npm run test:auth
 ```
 
-已验证登录、筛选、详情页签、会话原图的 WebP 预览与原图下载、别名修改、移动宽度及没有 JS 错误；图片读取携带管理鉴权，详情关闭后释放 Blob URL，注入外部图片 URL 后浏览器仍无外部请求。CPAMC 同源存储兼容测试覆盖自动登录、中文备注、历史筛选、动态更新、手动优先、退出清空和跨服务凭据拒绝。下载器测试覆盖内网 / 元数据拒绝、混合 DNS、重定向、TLS 验证、CONNECT 出口代理、容量、重启与队列溢出恢复、损坏修复和保留清理。前端运行和插件构建均不需要安装 npm 依赖，npm 仅用于浏览器测试。
+已验证登录、筛选、详情页签、会话原图的 WebP 预览与原图下载、别名修改、移动宽度及没有 JS 错误；图片读取携带管理鉴权，详情关闭后释放 Blob URL，注入外部图片 URL 后浏览器仍无外部请求。CPAMC 同源存储兼容测试覆盖 v1 / 当前 v2 自动登录、中文备注、历史筛选、动态更新、手动优先、退出清空和跨服务凭据拒绝。手动登录测试覆盖记住 / 不保存、刷新与新浏览器上下文恢复、忘记、错误密钥不保存、鉴权失败与临时故障、存储不可用，以及自动 / 手动登录并发隔离。下载器测试覆盖内网 / 元数据拒绝、混合 DNS、重定向、TLS 验证、CONNECT 出口代理、容量、重启与队列溢出恢复、损坏修复和保留清理。前端运行和插件构建均不需要安装 npm 依赖，npm 仅用于浏览器测试。
 
 ## 参考资料
 

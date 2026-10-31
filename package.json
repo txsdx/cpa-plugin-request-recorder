@@ -1,12 +1,13 @@
 {
   "name": "cpa-plugin-request-recorder",
   "private": true,
-  "version": "0.8.2",
+  "version": "0.8.3",
   "scripts": {
     "test:browser": "node scripts/browser-smoke.cjs",
     "test:detail": "node scripts/browser-detail.cjs",
     "test:sessions": "node scripts/browser-sessions.cjs",
-    "test:panel": "node scripts/browser-panel.cjs"
+    "test:panel": "node scripts/browser-panel.cjs",
+    "test:auth": "node scripts/browser-auth.cjs"
   },
   "devDependencies": {
     "playwright-core": "1.56.1"

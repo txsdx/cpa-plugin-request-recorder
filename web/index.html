@@ -149,7 +149,7 @@
           <h3>连接后查看会话记录</h3>
           <p>
             使用 CPA 管理密钥连接。同源 CPAMC
-            已保存登录时自动连接；插件不另存密钥。
+            已保存登录时自动连接，也可手动连接并选择记住密钥。
           </p>
         </div>
         <footer>
@@ -174,7 +174,7 @@
         </div>
         <p>
           同源 CPAMC 已保存管理密钥时会自动连接。无法读取时，请输入当前 CPA
-          的管理密钥。此处登录仅用于查看，后台记录持续运行；插件不另存密钥。
+          的管理密钥。此处登录仅用于查看，后台记录持续运行。
         </p>
         <label
           >管理密钥<input
@@ -184,8 +184,15 @@
             required
             placeholder="Management secret key"
         /></label>
+        <label class="auto"
+          ><input type="checkbox" id="remember-key" />记住密钥，下次自动登录</label
+        >
+        <p class="muted">
+          仅在勾选后保存到当前浏览器、当前站点；本地混淆可逆，请在可信设备使用。
+        </p>
         <p id="login-error" class="error" role="alert"></p>
         <button type="submit" class="primary">连接并加载</button>
+        <button type="button" id="forget-key" hidden>忘记插件保存的密钥</button>
       </form>
     </dialog>
     <dialog id="alias-dialog">
