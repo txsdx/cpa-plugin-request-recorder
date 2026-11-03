@@ -64,7 +64,7 @@ func (c *previewCache) put(key string, data []byte) {
 	c.bytes += len(data)
 }
 
-func (a *imageArchive) preview(asset ImageAsset) ([]byte, error) {
+func (a *assetArchive) preview(asset ImageAsset) ([]byte, error) {
 	if err := a.ctx.Err(); err != nil {
 		return nil, err
 	}

@@ -17,15 +17,23 @@ const APIBase = "/v0/management/plugins/" + PluginID
 const ResourceBase = "/v0/resource/plugins/" + PluginID
 
 // Version is injected from the validated release tag by the build.
-var Version = "0.8.3"
+var Version = "0.9.0"
 
 func Registration() map[string]any {
 	return map[string]any{"schema_version": 6, "metadata": map[string]any{
 		"Name": PluginID, "Version": Version, "Author": "txsdx", "GitHubRepository": "https://github.com/txsdx/cpa-plugin-request-recorder",
 		"ConfigFields": []map[string]string{
-			{"Name": "max_database_bytes", "Type": "integer", "Description": "数据库容量上限，默认 1 GiB；自动淘汰最旧记录并整理，图片和 CPA 源日志另计"},
+			{"Name": "max_database_bytes", "Type": "integer", "Description": "数据库容量上限，默认 1 GiB；自动淘汰最旧记录并整理，图片、附件和 CPA 源日志另计"},
 			{"Name": "refresh_interval_seconds", "Type": "integer", "Description": "列表自动刷新间隔秒数，默认 1 秒，范围 1..3600"},
 			{"Name": "db_path", "Type": "string", "Description": "持久化数据库路径，变更需重启"},
+			{"Name": "files_dir", "Type": "string", "Description": "文件归档目录，默认数据库旁的 <数据库名>-files"},
+			{"Name": "archive_remote_files", "Type": "boolean", "Description": "服务器归档公网 HTTPS 文件链接，默认开启"},
+			{"Name": "max_file_bytes", "Type": "integer", "Description": "单个附件上限，默认 32 MiB"},
+			{"Name": "max_file_storage_bytes", "Type": "integer", "Description": "文件归档总容量，默认 2 GiB，独立于数据库和图片"},
+			{"Name": "max_cached_files", "Type": "integer", "Description": "归档文件数上限，默认 100000"},
+			{"Name": "max_files_per_record", "Type": "integer", "Description": "每条会话最多归档附件数，默认 64"},
+			{"Name": "file_workers", "Type": "integer", "Description": "后台文件归档并发，默认 1"},
+			{"Name": "file_download_timeout_seconds", "Type": "integer", "Description": "单个文件下载超时，默认 30 秒"},
 			{"Name": "images_dir", "Type": "string", "Description": "图片归档目录，默认数据库旁的 <数据库名>-images"},
 			{"Name": "preview_quality", "Type": "integer", "Description": "在线 WebP 预览画质，默认 75，范围 1..100；原图下载不改变"},
 			{"Name": "preview_max_dimension", "Type": "integer", "Description": "WebP 预览最长边，默认 1600 像素，范围 128..4096；小图不放大"},
@@ -46,11 +54,11 @@ func Registration() map[string]any {
 }
 func ManagementRegistration() map[string]any {
 	routes := []map[string]string{}
-	for _, p := range [][2]string{{"GET", "/records"}, {"GET", "/record"}, {"GET", "/export/markdown"}, {"GET", "/status"}, {"GET", "/storage"}, {"GET", "/image"}, {"GET", "/images"}, {"POST", "/settings"}, {"POST", "/aliases"}, {"POST", "/aliases/sync"}, {"POST", "/images/retry"}} {
+	for _, p := range [][2]string{{"GET", "/records"}, {"GET", "/record"}, {"GET", "/export/markdown"}, {"GET", "/status"}, {"GET", "/storage"}, {"GET", "/image"}, {"GET", "/images"}, {"GET", "/file"}, {"GET", "/files"}, {"POST", "/files/retry"}, {"POST", "/settings"}, {"POST", "/aliases"}, {"POST", "/aliases/sync"}, {"POST", "/images/retry"}} {
 		routes = append(routes, map[string]string{"Method": p[0], "Path": APIBase + p[1]})
 	}
 	return map[string]any{"Routes": routes, "Resources": []map[string]string{
-		{"Path": "/index.html", "Menu": "请求记录", "Description": "请求原文、上游响应与对话回放"},
+		{"Path": "/index.html", "Menu": "请求记录", "Description": "用户请求、模型结果、附件与对话回放"},
 		{"Path": "/app.js"}, {"Path": "/style.css"},
 	}}
 }
@@ -96,6 +104,11 @@ func (e *Engine) Management(req wire.ManagementRequest, web fs.FS) wire.Manageme
 			stats, err := e.store.StorageStats()
 			if err != nil {
 				return result(500, map[string]string{"error": "storage diagnostics failed"})
+			}
+			for _, archive := range []*assetArchive{e.images, e.files} {
+				for key, value := range archive.status() {
+					stats[key] = value
+				}
 			}
 			return result(200, stats)
 		case "/status":
@@ -160,6 +173,9 @@ func (e *Engine) Management(req wire.ManagementRequest, web fs.FS) wire.Manageme
 				}
 			}
 			e.images.decorate(messages, r.Images)
+			if e.files.decorateFiles(messages, r.Files) && !e.files.pending(r.ID) {
+				e.files.enqueue(r.ID)
+			}
 			// Previously stored tool JSON can reveal newly recognized images,
 			// even when the old archive inventory was already marked complete.
 			for _, m := range messages {
@@ -177,9 +193,13 @@ func (e *Engine) Management(req wire.ManagementRequest, web fs.FS) wire.Manageme
 				}
 			}
 			return result(200, map[string]any{"record": r, "conversation": messages})
-		case "/images":
+		case "/images", "/files":
 			id := req.Query.Get("record_id")
-			assets, err := e.store.GetImages(id)
+			archive, key := e.images, "images"
+			if path == "/files" {
+				archive, key = e.files, "files"
+			}
+			assets, err := archive.inventory.get(id)
 			if err != nil {
 				return result(404, map[string]string{"error": "record not found"})
 			}
@@ -189,12 +209,14 @@ func (e *Engine) Management(req wire.ManagementRequest, web fs.FS) wire.Manageme
 					needs = true
 				}
 			}
-			if needs && !e.images.pending(id) {
-				e.images.enqueue(id)
+			if needs && !archive.pending(id) {
+				archive.enqueue(id)
 			}
-			return result(200, map[string]any{"images": assets, "pending": e.images.pending(id), "limit": e.cfg.MaxImagesPerRecord})
+			return result(200, map[string]any{key: assets, "pending": archive.pending(id), "limit": archive.cfg.MaxImagesPerRecord})
 		case "/image":
 			return e.imageResponse(req)
+		case "/file":
+			return e.fileResponse(req)
 		}
 	}
 	if req.Method == "POST" && path == "/settings" {
@@ -210,12 +232,16 @@ func (e *Engine) Management(req wire.ManagementRequest, web fs.FS) wire.Manageme
 		}
 		return result(200, e.store.Settings(e.cfg.RefreshIntervalSeconds))
 	}
-	if req.Method == "POST" && path == "/images/retry" {
+	if req.Method == "POST" && (path == "/images/retry" || path == "/files/retry") {
 		id := req.Query.Get("record_id")
 		if len(id) == 0 || len(id) > 256 {
 			return result(400, map[string]string{"error": "invalid record_id"})
 		}
-		if err := e.images.retry(id); err != nil {
+		archive := e.images
+		if path == "/files/retry" {
+			archive = e.files
+		}
+		if err := archive.retry(id); err != nil {
 			if errors.Is(err, ErrNotFound) {
 				return result(404, map[string]string{"error": "record not found"})
 			}

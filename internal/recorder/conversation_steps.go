@@ -21,7 +21,7 @@ func conversationSteps(messages []Message) int {
 			previous = nil
 			continue
 		}
-		if m.Content == "" && len(m.Images) == 0 && m.Kind != "tool_call" && m.Kind != "tool_result" {
+		if m.Content == "" && len(m.Images) == 0 && len(m.Files) == 0 && m.Kind != "tool_call" && m.Kind != "tool_result" {
 			continue
 		}
 		tool := m.Kind == "tool_call" || m.Kind == "tool_result"

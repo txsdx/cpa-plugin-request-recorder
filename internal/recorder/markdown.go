@@ -169,6 +169,15 @@ func (e *Engine) renderMarkdown(r *Record) ([]byte, error) {
 		if err := write(title + "\n\n"); err != nil {
 			return nil, err
 		}
+		if message.RecordedAt != nil {
+			source := "CPA 响应结束"
+			if message.TimeSource == "request_received" {
+				source = "CPA 接收请求"
+			}
+			if err := write("记录时间：" + message.RecordedAt.Format(time.RFC3339Nano) + "（" + source + "）\n\n"); err != nil {
+				return nil, err
+			}
+		}
 		if message.Name != "" {
 			if err := write("工具：" + markdownLabel(message.Name) + "\n\n"); err != nil {
 				return nil, err
@@ -194,6 +203,11 @@ func (e *Engine) renderMarkdown(r *Record) ([]byte, error) {
 				return nil, err
 			}
 			if err = write(content); err != nil {
+				return nil, err
+			}
+		}
+		for _, file := range message.Files {
+			if err := write("附件：" + markdownLabel(file.Filename) + "（请在插件 WebUI 下载原文件）。\n\n"); err != nil {
 				return nil, err
 			}
 		}

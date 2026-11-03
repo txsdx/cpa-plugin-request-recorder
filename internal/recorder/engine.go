@@ -14,6 +14,14 @@ import (
 )
 
 type Config struct {
+	FilesDir                    string `yaml:"files_dir"`
+	ArchiveRemoteFiles          bool   `yaml:"archive_remote_files"`
+	MaxFileBytes                int64  `yaml:"max_file_bytes"`
+	MaxFileStorageBytes         int64  `yaml:"max_file_storage_bytes"`
+	MaxCachedFiles              int    `yaml:"max_cached_files"`
+	MaxFilesPerRecord           int    `yaml:"max_files_per_record"`
+	FileWorkers                 int    `yaml:"file_workers"`
+	FileDownloadTimeoutSeconds  int    `yaml:"file_download_timeout_seconds"`
 	PreviewQuality              int    `yaml:"preview_quality"`
 	PreviewMaxDimension         int    `yaml:"preview_max_dimension"`
 	MaxDatabaseBytes            int64  `yaml:"max_database_bytes"`
@@ -35,9 +43,12 @@ type Config struct {
 }
 
 func DefaultConfig() Config {
-	return Config{PreviewQuality: 75, PreviewMaxDimension: 1600, MaxDatabaseBytes: 1 << 30, RefreshIntervalSeconds: 1, ArchiveRemoteImages: true, MaxImageFiles: 100000, MaxImageBytes: 20 << 20, MaxImageStorageBytes: 2 << 30, MaxImagesPerRecord: 64, ImageWorkers: 2, ImageDownloadTimeoutSeconds: 20, DBPath: "data/request-recorder.db", RetentionDays: 30, MaxRecords: 100000, MaxBodyBytes: 64 << 20, MaxInflight: 256, MaxMemoryBytes: 256 << 20}
+	return Config{ArchiveRemoteFiles: true, MaxFileBytes: 32 << 20, MaxFileStorageBytes: 2 << 30, MaxCachedFiles: 100000, MaxFilesPerRecord: 64, FileWorkers: 1, FileDownloadTimeoutSeconds: 30, PreviewQuality: 75, PreviewMaxDimension: 1600, MaxDatabaseBytes: 1 << 30, RefreshIntervalSeconds: 1, ArchiveRemoteImages: true, MaxImageFiles: 100000, MaxImageBytes: 20 << 20, MaxImageStorageBytes: 2 << 30, MaxImagesPerRecord: 64, ImageWorkers: 2, ImageDownloadTimeoutSeconds: 20, DBPath: "data/request-recorder.db", RetentionDays: 30, MaxRecords: 100000, MaxBodyBytes: 64 << 20, MaxInflight: 256, MaxMemoryBytes: 256 << 20}
 }
 func (c Config) Validate() error {
+	if c.MaxFileBytes < 1024 || c.MaxFileBytes > 64<<20 || c.MaxFileStorageBytes < c.MaxFileBytes || c.MaxCachedFiles < 1 || c.MaxCachedFiles > 1000000 || c.MaxFilesPerRecord < 1 || c.MaxFilesPerRecord > 128 || c.FileWorkers < 1 || c.FileWorkers > 4 || c.FileDownloadTimeoutSeconds < 1 || c.FileDownloadTimeoutSeconds > 120 {
+		return errors.New("invalid file limits: file bytes 1KiB..64MiB; storage >= one file; cached files 1..1000000; files/record 1..128; workers 1..4; timeout 1..120s")
+	}
 	if c.PreviewQuality < 1 || c.PreviewQuality > 100 || c.PreviewMaxDimension < 128 || c.PreviewMaxDimension > 4096 {
 		return errors.New("preview_quality must be 1..100; preview_max_dimension must be 128..4096")
 	}
@@ -63,7 +74,8 @@ type active struct {
 	size     int
 }
 type Engine struct {
-	images            *imageArchive
+	files             *assetArchive
+	images            *assetArchive
 	mu                sync.Mutex
 	store             *Store
 	cfg               Config
@@ -104,7 +116,14 @@ func New(c Config) (*Engine, error) {
 		s.Close()
 		return nil, err
 	}
+	e.files, err = newFileArchive(c, s)
+	if err != nil {
+		e.images.close()
+		s.Close()
+		return nil, err
+	}
 	e.images.start()
+	e.files.start()
 	go e.maintain()
 	return e, nil
 }
@@ -112,6 +131,7 @@ func (e *Engine) Close() error {
 	close(e.stop)
 	<-e.done
 	imageErr := e.images.close()
+	fileErr := e.files.close()
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	for id, a := range e.active {
@@ -122,7 +142,7 @@ func (e *Engine) Close() error {
 		e.persist(a)
 		delete(e.active, id)
 	}
-	return errors.Join(imageErr, e.store.Close())
+	return errors.Join(imageErr, fileErr, e.store.Close())
 }
 func (e *Engine) error(err error) {
 	if err != nil {
@@ -486,6 +506,9 @@ func (e *Engine) Complete(c wire.Completion) error {
 	}
 	e.rememberUsage(r)
 	e.images.enqueue(r.ID)
+	if r.FileCount > 0 {
+		e.files.enqueue(r.ID)
+	}
 	return nil
 }
 func (e *Engine) markFinished(id string) {
@@ -558,6 +581,9 @@ func (e *Engine) Status() map[string]any {
 		status[key] = value
 	}
 	for key, value := range e.images.status() {
+		status[key] = value
+	}
+	for key, value := range e.files.status() {
 		status[key] = value
 	}
 	return status

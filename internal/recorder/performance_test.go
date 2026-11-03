@@ -138,7 +138,7 @@ func BenchmarkConversationSave(b *testing.B) {
 
 func BenchmarkRecordRead(b *testing.B) {
 	s, id := benchmarkLongRecord(b)
-	e := &Engine{store: s, cfg: DefaultConfig(), images: &imageArchive{}}
+	e := &Engine{store: s, cfg: DefaultConfig(), images: &assetArchive{}}
 	for _, view := range []string{"full", "chat"} {
 		b.Run(view, func(b *testing.B) {
 			query := url.Values{"id": {id}}

@@ -192,7 +192,13 @@ func (f *imageFetcher) connection(ctx context.Context, u *url.URL, ip netip.Addr
 	return secure, nil
 }
 func (f *imageFetcher) fetch(ctx context.Context, source string, max int64) ([]byte, string, error) {
+	return f.fetchAsset(ctx, source, max, false)
+}
+func (f *imageFetcher) fetchAsset(ctx context.Context, source string, max int64, file bool) ([]byte, string, error) {
 	if strings.HasPrefix(source, "data:") {
+		if file {
+			return inlineFile(source, max)
+		}
 		return inlineImage(source, max)
 	}
 	u, err := imageRemoteURL(source)
@@ -210,6 +216,10 @@ func (f *imageFetcher) fetch(ctx context.Context, source string, max int64) ([]b
 		}
 		req.Header.Set("User-Agent", "CPA-Request-Recorder-Image-Archive/1")
 		req.Header.Set("Accept", "image/png,image/jpeg,image/gif,image/webp,image/avif,image/bmp")
+		if file {
+			req.Header.Set("User-Agent", "CPA-Request-Recorder-File-Archive/1")
+			req.Header.Set("Accept", "*/*")
+		}
 		// A fresh request/transport has no cookie jar, caller headers or HTTP auth.
 		proxy, err := f.proxy(req)
 		if err != nil {
@@ -261,6 +271,13 @@ func (f *imageFetcher) fetch(ctx context.Context, source string, max int64) ([]b
 		}
 		if int64(len(data)) > max {
 			return nil, "", errors.New("图片超过单张大小限制")
+		}
+		if file {
+			typ := fileMediaType(resp.Header.Get("Content-Type"))
+			if typ == "application/octet-stream" {
+				typ = fileMediaType(http.DetectContentType(data))
+			}
+			return data, typ, nil
 		}
 		mime, err := imageMIME(data)
 		return data, mime, err

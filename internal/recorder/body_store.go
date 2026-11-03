@@ -149,7 +149,7 @@ func decodeBodyChunk(id string, data []byte) (string, error) {
 
 func prepareStoredRecord(r *Record) (storedRecord, map[string]string) {
 	stored := storedRecord{Record: *r, StorageVersion: 1, Bodies: map[string]bodyManifest{}}
-	stored.Images, stored.KeyAlias = nil, ""
+	stored.Images, stored.Files, stored.KeyAlias = nil, nil, ""
 	chunks := map[string]string{}
 	for name, field := range recordBodyFields(&stored.Record) {
 		if *field == "" {

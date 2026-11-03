@@ -12,6 +12,7 @@ CLIProxyAPI 的原生插件：在模型请求结束后更新完整会话，在 *
 - 查看请求时间、总耗时、宿主 TTFT、首分片耗时、输入/输出/思考/cache read/cache creation token 与缓存比例；缺失指标显示 `—`。
 - 对话回放支持 OpenAI Chat Completions / Responses、Claude Messages、Gemini：系统指令、用户消息、模型输出、公开的思考内容/摘要、工具名、调用参数、调用 ID、工具返回值。
 - **显示原始图片**：OpenAI `image_url` / `input_image`、Claude base64/url source、Gemini inlineData/fileData、OpenAI 图片生成 `b64_json` / Responses `image_generation_call`。内嵌图片和公网 HTTPS 图片由 CPA 服务端保存到插件图片目录，通过管理鉴权接口展示 WebP 压缩预览，点击下载时才传输原图；浏览器不访问图片源站。原始多模态字段保留在正文和 JSON 导出中。
+- **保存上传附件**：请求内嵌文件和公网 HTTPS 文件由服务器归档去重，在对话回放中按原始文件名下载；支持 OpenAI、Claude、Gemini 文件字段。用户、模型与工具步骤显示已采集的 CPA 观察时间。
 - 会话详情支持一键导出 Markdown：完整多轮消息、可见思考、工具参数 / 返回与内嵌原图；同时保留 JSON 导出。
 - 本地 bbolt 持久化、摘要/时间/trace 索引、分页、历史别名修改、保留期限和条目上限。无需外部数据库。
 
@@ -31,15 +32,15 @@ CLIProxyAPI 的原生插件：在模型请求结束后更新完整会话，在 *
 
 Linux 包在 Debian 12 / glibc 环境原生编译，匹配所检查 CPA Dockerfile 的系统基线；Alpine / musl 和 Windows ARM64 不包含在这五种发布目标中。Docker 部署应按 **容器内部** 的 OS / 架构选择，不是按浏览器或宿主桌面系统选择。
 
-以 Linux amd64 `v0.8.3` 为例：
+以 Linux amd64 `v0.9.0` 为例：
 
-1. 下载 `request-recorder_0.8.3_linux_amd64.zip` 和 `checksums.txt`，放在同一目录。
+1. 下载 `request-recorder_0.9.0_linux_amd64.zip` 和 `checksums.txt`，放在同一目录。
 2. 校验并解压到 CPA 的插件目录：
 
    ```bash
    sha256sum --ignore-missing --check checksums.txt
    mkdir -p /path/to/CLIProxyAPI/plugins/linux/amd64
-   unzip request-recorder_0.8.3_linux_amd64.zip -d /path/to/CLIProxyAPI/plugins/linux/amd64
+   unzip request-recorder_0.9.0_linux_amd64.zip -d /path/to/CLIProxyAPI/plugins/linux/amd64
    ```
 
 3. 合并下面的插件配置，设置数据库持久化，然后重启 CPA。无需配置日志目录。
@@ -93,7 +94,7 @@ plugins:
     - "https://raw.githubusercontent.com/txsdx/cpa-plugin-request-recorder/main/registry.json"
 ```
 
-刷新商店，选择 `CPA Request Recorder · 请求记录`，点击安装。以后刷新检查更新，再点击更新即可。CPA 从仓库的**最新正式 Release**解析版本，自动选择 OS / CPU 对应 zip，校验 `checksums.txt`，并写入带版本的库文件（例如 `plugins/linux/amd64/request-recorder-v0.8.3.so`）。不要为了匹配版本再手动重命名 Release 的 zip 或库。
+刷新商店，选择 `CPA Request Recorder · 请求记录`，点击安装。以后刷新检查更新，再点击更新即可。CPA 从仓库的**最新正式 Release**解析版本，自动选择 OS / CPU 对应 zip，校验 `checksums.txt`，并写入带版本的库文件（例如 `plugins/linux/amd64/request-recorder-v0.9.0.so`）。不要为了匹配版本再手动重命名 Release 的 zip 或库。
 
 安装源解决的是下载安装和版本更新。仍需按本文配置数据库持久化；GUI 通过 CPAMC 插件资源打开。更新是否热加载或要求重启由 CPA 版本及运行平台决定。预发布版本不会被 GitHub latest 接口当作正式更新推送。
 
@@ -299,7 +300,23 @@ Token 列对应最新一次 API 请求的输入与输出总量，并展开输入
 
 下载走 CPA 管理鉴权接口，沿用 CPA 的 TLS。导出文件总大小（含原图 base64）受 `max_body_bytes` 限制，默认 64 MiB；超过限制会提示错误，不下载截断文件。采集时已有的警告和错误会写入文件。
 
-### 对话、图片和日志存在哪里
+### 对话回放时间
+
+v0.9.0 在用户、模型、工具调用和工具结果标签旁显示已采集的时间。标注的是 **CPA 观察时间**：当前请求末尾的用户 / 工具结果等输入组使用 CPA 收到请求的时间，本次模型输出和工具调用使用 CPA 响应结束时间；不是模型内部执行工具的精确起止时间。悬停可查看时间含义。连续对话和已确认分支保留原消息时间，不用最新请求时间覆盖旧历史；未采集过的历史消息不推测、不补假时间。新时间元数据随会话及 JSON / Markdown 导出保存，不参与上下文身份匹配。
+
+### 用户上传的文件
+
+v0.9.0 在对话回放中显示附件卡片，包括请求提供的文件名、归档状态、MIME、大小和 **下载原文件**。附件不自动下载、不在页面内执行或解析，点击时才向 CPA 的管理接口读取原始字节；浏览器不访问原文件服务。文件本身不转码、不压缩，按内容 SHA-256 去重；不同文件名可引用同一份物理文件。文件名会去掉路径和控制字符，服务器文件路径只由内容哈希生成。
+
+支持 Chat Completions `file.file_data`、Responses `input_file.file_data`、Claude `document.source`、Gemini `inlineData` / `fileData`，包括 base64、data URI、文本 document，以及公网 HTTPS 文件 URL。**只有 CPA 实际收到的原始文件数据或无需额外凭据的可下载链接才能归档**。只有上游 `file_id`、`gs://` / 私有文件引用、本机路径，或客户端已提取出的文本，不能恢复未发送给 CPA 的原文件。只有文件 ID 时显示不可获取；过期链接、非 HTTPS / 内网地址或归档失败会显示原因，可重试。
+
+文件默认保存到数据库旁的 `<数据库名>-files` 目录，例如 `data/request-recorder-files/`；Docker 需要与数据库和图片目录一起持久化。默认单文件 **32 MiB**、目录总容量 **2 GiB**、最多 **100000** 个去重文件、每个完整会话最多 **64** 个附件，后台并发 **1**、下载超时 **30 秒**。分别用 `max_file_bytes`、`max_file_storage_bytes`、`max_cached_files`、`max_files_per_record`、`file_workers`、`file_download_timeout_seconds` 调整，`files_dir` 自定义目录；`archive_remote_files: false` 只禁止远程下载，仍保存请求内嵌的文件。采集与完整会话仍受 `max_body_bytes` 限制，文件的 base64 传输会增加请求体大小。
+
+文件归档任务可在队列满或重启后继续；旧记录首次打开时按需补归档。分支只继承已确认上下文中的附件，父记录清理不会破坏子分支仍引用的原文件。配额满时保留已归档文件，新文件显示失败；记录删除后，不再被任何记录引用的文件经过至少 5 分钟宽限，由每分钟清理任务删除。文件目录独立于 `max_database_bytes`，存储占用面板显示实际占用和文件容量上限。原始正文保留内嵌文件，聊天接口不传输这些 base64 字段。
+
+远程文件使用与图片相同的公网 HTTPS、证书验证、DNS 固定与重定向检查，不转发调用者或上游凭据。所有文件都通过管理鉴权接口强制以附件下载，不直接提供静态文件 URL。Markdown 导出保留附件名称，原文件在 WebUI 单独下载；JSON 导出仍保留原始文件字段。本次升级沿用 v0.8.3 的会话数据库，无需删除现有数据库。
+
+### 对话、图片、附件和日志存在哪里
 
 默认路径相对于 **CPA 进程工作目录**，不相对于 CPAMC 浏览器或配置文件目录：
 
@@ -307,6 +324,7 @@ Token 列对应最新一次 API 请求的输入与输出总量，并展开输入
 | --- | --- |
 | 最新原请求、模型最终结果、完整会话与最新用量元数据、图片索引 | `data/request-recorder.db`（bbolt） |
 | 已归档原图 | `data/request-recorder-images/<图片内容 SHA-256>.png` 等 |
+| 已归档附件原文件 | `data/request-recorder-files/<文件内容 SHA-256>.bin`；WebUI 下载时还原请求中的文件名 |
 | CPA 原始请求日志 | 由 CPA 自身管理，插件不读取 |
 | 插件运行错误日志 | CPA 进程日志，由 CPA 的日志配置决定 |
 
@@ -320,7 +338,7 @@ Token 列对应最新一次 API 请求的输入与输出总量，并展开输入
 
 配额满时保留已归档图片，新图显示失败，不自动驱逐仍有记录引用的图片。记录过期后，未被其他记录引用的图片经过至少 5 分钟宽限，由每分钟运行的清理任务删除。`GET /status` 包含实际 `images_dir`、已用字节、配额和待处理任务数。
 
-数据库、图片与 CPA 日志均为本地明文文件，TLS 只保护传输。备份或迁移时应暂停 CPA，并同时复制 **数据库和图片目录**；CPA 源日志按需另备份。JSON 导出保留原始内嵌数据和远程 URL / 图片索引，不打包远程图片文件。改动 `db_path` 后若要继续使用原图片目录，需要明确设置 `images_dir`。图片目录应由插件独占；目录 `0700`、新文件 `0600`（具体权限语义随操作系统而定）。
+数据库、图片、附件与 CPA 日志均为本地明文文件，TLS 只保护传输。备份或迁移时应暂停 CPA，并同时复制 **数据库、图片和附件目录**；CPA 源日志按需另备份。JSON 导出保留原始内嵌数据和远程 URL / 图片索引，不打包远程图片文件。改动 `db_path` 后若要继续使用原图片目录，需要明确设置 `images_dir`。图片目录应由插件独占；目录 `0700`、新文件 `0600`（具体权限语义随操作系统而定）。
 
 未公开思考、插件未观察过的 `previous_response_id` 历史、未返回的工具结果不会被补造。
 
@@ -336,6 +354,9 @@ Token 列对应最新一次 API 请求的输入与输出总量，并展开输入
 | `GET /storage` | 活动文件、空闲页、容量淘汰、压缩去重后正文与整理状态 |
 | `POST /settings` | `{"refresh_interval_seconds":1,"ignore_rejected":true}`，可独立更新刷新间隔或忽略已拒绝条目的偏好 |
 | `GET /status` | 采集、用量、存储错误，以及图片目录 / 配额 / 待处理数 |
+| `GET /files?record_id=…` | 文件归档索引及状态，不重新解压完整会话 |
+| `GET /file?record_id=…&id=…` | 带管理鉴权下载原文件，检查会话归属、大小和内容哈希 |
+| `POST /files/retry?record_id=…` | 重试失败的附件归档 |
 | `GET /images?record_id=…` | 图片归档状态；轮询不重新读取巨大正文 |
 | `GET /image?record_id=…&id=…&variant=preview` | 返回该会话原图的 WebP 压缩预览，同样需要管理鉴权 |
 | `GET /image?record_id=…&id=…&variant=original` | 下载归档原图，原始字节与实际类型不变；省略 variant 也返回原图，不接受任意 URL |
@@ -353,7 +374,7 @@ v0.8.2 优化默认每秒刷新的列表：总数与“忽略已拒绝”计数�
 
 在同一测试机的合成基准中，1 万条记录的未缓存首屏读取从约 272 ms / 45 MiB 临时分配降到约 1.4 ms / 234 KiB；未变化页的重复刷新约 0.14 ms / 106 KiB。约 2 MiB 会话回放的临时分配从约 55 MiB 降到约 26 MiB。方法、基线和限制见 [性能基准](docs/performance.md)。这些是单次操作的耗时 / 累计分配，不是你的 CPA 常驻内存测量。
 
-`max_memory_bytes` 默认 256 MiB，仅限制正在采集的正文预算，不是整个插件或 CPA 进程 RSS 的硬上限；不会启动就预分配满。长上下文合并、压缩 / JSON 临时对象、Go 运行时、数据库映射页和图片处理另计。WebP 压缩预览缓存上限 32 MiB / 64 项，一次只转换一张预览；默认图片下载并发 2。大图首次解码和长会话结束时仍会出现 CPU / 内存峰值。浏览器关闭或未登录不会停止后台采集；没有请求、清理或图片任务时，后台只做轻量定时维护。
+`max_memory_bytes` 默认 256 MiB，仅限制正在采集的正文预算，不是整个插件或 CPA 进程 RSS 的硬上限；不会启动就预分配满。长上下文合并、压缩 / JSON 临时对象、Go 运行时、数据库映射页和图片处理另计。WebP 压缩预览缓存上限 32 MiB / 64 项，一次只转换一张预览；默认图片下载并发 2，附件归档并发 1、单文件上限 32 MiB，点击下载的原文件也占用临时内存。大图首次解码和长会话结束时仍会出现 CPU / 内存峰值。浏览器关闭或未登录不会停止后台采集；没有请求、清理或图片任务时，后台只做轻量定时维护。
 
 首次打开现有会话数据库会从摘要建立一次计数索引，不读取或迁移正文；无需删除现有数据库。
 
@@ -391,6 +412,7 @@ CHROMIUM_PATH=/usr/bin/chromium npm run test:detail
 CHROMIUM_PATH=/usr/bin/chromium npm run test:sessions
 CHROMIUM_PATH=/usr/bin/chromium npm run test:panel
 CHROMIUM_PATH=/usr/bin/chromium npm run test:auth
+CHROMIUM_PATH=/usr/bin/chromium npm run test:files
 ```
 
 已验证登录、筛选、详情页签、会话原图的 WebP 预览与原图下载、别名修改、移动宽度及没有 JS 错误；图片读取携带管理鉴权，详情关闭后释放 Blob URL，注入外部图片 URL 后浏览器仍无外部请求。CPAMC 同源存储兼容测试覆盖 v1 / 当前 v2 自动登录、中文备注、历史筛选、动态更新、手动优先、退出清空和跨服务凭据拒绝。手动登录测试覆盖记住 / 不保存、刷新与新浏览器上下文恢复、忘记、错误密钥不保存、鉴权失败与临时故障、存储不可用，以及自动 / 手动登录并发隔离。下载器测试覆盖内网 / 元数据拒绝、混合 DNS、重定向、TLS 验证、CONNECT 出口代理、容量、重启与队列溢出恢复、损坏修复和保留清理。前端运行和插件构建均不需要安装 npm 依赖，npm 仅用于浏览器测试。

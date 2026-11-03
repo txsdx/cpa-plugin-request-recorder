@@ -21,6 +21,9 @@ import urllib.request
 ROOT = Path(__file__).resolve().parents[1]
 PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg=='
 IMAGE = 'data:image/png;base64,' + PNG
+FILE_BYTES = b'%PDF-1.7\nsynthetic uploaded file\x00\xff\n%%EOF\n'
+FILE_DATA = 'data:application/pdf;base64,' + base64.b64encode(FILE_BYTES).decode()
+FILE_NAME = '测试附件.pdf'
 KEY = 'sk-recorder-integration-client'
 MANAGEMENT = 'recorder-integration-management'
 
@@ -128,12 +131,13 @@ plugins:
         for stream in [False,True]:
             body={'model':'mock-model','stream':stream,'messages':[{'role':'user','content':[{'type':'text','text':'图里是什么？'},{'type':'image_url','image_url':{'url':IMAGE}}]}]}
             if not stream:
+                body['messages'][0]['content'].append({'type':'file','file':{'filename':FILE_NAME,'file_data':FILE_DATA}})
                 body['messages'] += [
                     {'role':'assistant','tool_calls':[{'id':'call_read_image','type':'function','function':{'name':'Read','arguments':'{"path":"synthetic.png"}'}}]},
                     {'role':'tool','tool_call_id':'call_read_image','name':'Read','content':json.dumps([{'image_url':IMAGE}])}
                 ]
             if stream:
-                body={'model':'responses-model','stream':True,'input':[{'role':'user','content':[{'type':'input_text','text':'图里是什么？'},{'type':'input_image','image_url':IMAGE}]}]}
+                body={'model':'responses-model','stream':True,'input':[{'role':'user','content':[{'type':'input_text','text':'图里是什么？'},{'type':'input_image','image_url':IMAGE},{'type':'input_file','filename':FILE_NAME,'file_data':FILE_DATA}]}]}
             data=request('/v1/responses' if stream else '/v1/chat/completions',body,key=KEY,session='stream' if stream else 'json')
             if stream: assert b'159,' in data
         records=None
@@ -164,8 +168,29 @@ plugins:
             except urllib.error.HTTPError as e: assert e.code in (401,403)
             else: raise AssertionError('public image access allowed')
             assert (work/'recorder-images'/(image['hash']+'.png')).read_bytes()==base64.b64decode(PNG)
+            for _ in range(100):
+                files=json.loads(request('/v0/management/plugins/request-recorder/files?record_id='+item['id']))['files']
+                if files and all(f['status']=='ready' for f in files): break
+                time.sleep(.05)
+            assert len(files)==1 and files[0]['status']=='ready',files
+            archived_file=files[0]
+            file_path='/v0/management/plugins/request-recorder/file?record_id='+item['id']+'&id='+archived_file['id']
+            assert request(file_path)==FILE_BYTES
+            assert archived_file['filename']==FILE_NAME
+            assert (work/'recorder-files'/(archived_file['hash']+'.bin')).read_bytes()==FILE_BYTES
+            for file_route in [file_path,'/v0/management/plugins/request-recorder/files?record_id='+item['id']]:
+                try: request(file_route,key=None)
+                except urllib.error.HTTPError as e: assert e.code in (401,403)
+                else: raise AssertionError('public attachment access allowed')
+            sanitized=request('/v0/management/plugins/request-recorder/record?id='+item['id']+'&view=chat')
+            assert b'base64,' not in sanitized, 'file or image payload leaked into chat response'
             assert '图里是什么？' in d['record']['latest_prompt']
             assert d['record']['latest_response']
+            model_times=[m for m in d['conversation'] if m['source']=='response']
+            assert model_times and all(m.get('recorded_at')==d['record']['completed_at'] and m.get('time_source')=='response_completed' for m in model_times)
+            if item['stream']:
+                user_times=[m for m in d['conversation'] if m['source']=='request' and m['role']=='user']
+                assert user_times and all(m.get('recorded_at')==d['record']['started_at'] and m.get('time_source')=='request_received' for m in user_times)
             if item['stream']:
                 assert '159,' in d['record']['response_body'] and not d['record']['response_body'].startswith('data: ')
                 assert item['tokens']['TotalTokens']==260,item
@@ -288,6 +313,9 @@ plugins:
             assert images and images[0]['status']=='ready',images
             image_path='/v0/management/plugins/request-recorder/image?record_id='+head['id']+'&id='+images[0]['id']
             assert request(image_path)==base64.b64decode(PNG)
+            inherited_files=json.loads(request('/v0/management/plugins/request-recorder/files?record_id='+head['id']))['files']
+            assert len(inherited_files)==1 and inherited_files[0]['status']=='ready',inherited_files
+            assert request('/v0/management/plugins/request-recorder/file?record_id='+head['id']+'&id='+inherited_files[0]['id'])==FILE_BYTES
             markdown=request('/v0/management/plugins/request-recorder/export/markdown?id='+head['id']).decode('utf-8')
             assert '分支历史：已继承到父响应' in markdown and '图里是什么？' in markdown
             assert '继续解释这张图' not in markdown and IMAGE in markdown
@@ -298,7 +326,7 @@ plugins:
         assert final_records['total']==7,final_records
         status=json.loads(request('/v0/management/plugins/request-recorder/status'))
         assert status['unmatched_usage']==0 and status['discarded_usage']==0,status
-        print(json.dumps({'result':'PASS','records':7,'stream_chunks':160,'checks':['native CPA loading','public GUI registration','management authentication','nonstream and SSE capture','usage join','native Responses complete final snapshot without logs','latest conversation replaces prior snapshot','authenticated full-history Markdown export with original images','input and output images','authenticated local image archive','image file persistence','compressed WebP preview and original download','CPAMC alias sync authentication','alias filtering','Cherry Agent prompt_cache_key incremental history','Codex Session-Id incremental history','Codex child Thread-Id isolation','Billing and client session ID filtering','sibling forks inherit exact response boundary and original images','branch accounting excludes inherited requests','parent remains unchanged'],'workdir':str(work),'port':port},ensure_ascii=False))
+        print(json.dumps({'result':'PASS','records':7,'stream_chunks':160,'checks':['native CPA loading','public GUI registration','management authentication','nonstream and SSE capture','usage join','native Responses complete final snapshot without logs','latest conversation replaces prior snapshot','authenticated full-history Markdown export with original images','input and output images','original uploaded file archiving and authenticated download','per-message request/response observation times','branch file inheritance','authenticated local image archive','image file persistence','compressed WebP preview and original download','CPAMC alias sync authentication','alias filtering','Cherry Agent prompt_cache_key incremental history','Codex Session-Id incremental history','Codex child Thread-Id isolation','Billing and client session ID filtering','sibling forks inherit exact response boundary and original images','branch accounting excludes inherited requests','parent remains unchanged'],'workdir':str(work),'port':port},ensure_ascii=False))
         if os.environ.get('KEEP_RUNNING')=='1':
             print('KEEP_RUNNING: press Ctrl+C to stop',flush=True)
             while proc.poll() is None: time.sleep(1)

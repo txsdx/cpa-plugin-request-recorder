@@ -5,18 +5,22 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type Message struct {
-	ResponseID string  `json:"response_id,omitempty"`
-	Role       string  `json:"role"`
-	Kind       string  `json:"kind"`
-	Name       string  `json:"name,omitempty"`
-	ToolCallID string  `json:"tool_call_id,omitempty"`
-	Content    string  `json:"content"`
-	Choice     int     `json:"choice,omitempty"`
-	Source     string  `json:"source"`
-	Images     []Image `json:"images,omitempty"`
+	RecordedAt *time.Time `json:"recorded_at,omitempty"`
+	TimeSource string     `json:"time_source,omitempty"`
+	ResponseID string     `json:"response_id,omitempty"`
+	Role       string     `json:"role"`
+	Kind       string     `json:"kind"`
+	Name       string     `json:"name,omitempty"`
+	ToolCallID string     `json:"tool_call_id,omitempty"`
+	Content    string     `json:"content"`
+	Choice     int        `json:"choice,omitempty"`
+	Source     string     `json:"source"`
+	Images     []Image    `json:"images,omitempty"`
+	Files      []File     `json:"files,omitempty"`
 }
 type Image struct {
 	ID     string `json:"id,omitempty"`
@@ -147,7 +151,9 @@ func blocks(role string, content any) []Message {
 			out = append(out, m)
 		case "image", "image_url", "input_image", "output_image":
 			out = append(out, imageMessage(role, b))
-		case "input_audio", "audio", "file", "document", "input_file":
+		case "file", "document", "input_file":
+			out = append(out, fileMessage(role, b))
+		case "input_audio", "audio":
 			out = append(out, message(role, "attachment", printable(b)))
 		default:
 			if b["image_url"] != nil {
@@ -273,7 +279,7 @@ func geminiContent(m map[string]any) []Message {
 			if strings.HasPrefix(mime, "image/") {
 				out = append(out, imageMessage(role, p))
 			} else {
-				out = append(out, message(role, "attachment", printable(p)))
+				out = append(out, fileMessage(role, p))
 			}
 		}
 		if p["fileData"] != nil || p["file_data"] != nil {
@@ -289,7 +295,7 @@ func geminiContent(m map[string]any) []Message {
 			if strings.HasPrefix(mime, "image/") {
 				out = append(out, imageMessage(role, map[string]any{"url": url}))
 			} else {
-				out = append(out, message(role, "attachment", printable(p)))
+				out = append(out, fileMessage(role, p))
 			}
 		}
 	}
@@ -350,6 +356,7 @@ func fullResponse(m map[string]any) []Message {
 		_ = json.Unmarshal(data, &messages)
 		for i := range messages {
 			normalizeToolImages(&messages[i])
+			normalizeMessageFiles(&messages[i])
 		}
 		return messages
 	}

@@ -69,6 +69,8 @@ type Record struct {
 	Summary
 	InheritedResponseIDs []string       `json:"inherited_response_ids,omitempty"`
 	Images               []ImageAsset   `json:"images,omitempty"`
+	Files                []ArchiveAsset `json:"files,omitempty"`
+	FileCount            int            `json:"file_count,omitempty"`
 	UsageAttempts        []UsageAttempt `json:"usage_attempts,omitempty"`
 	RequestBody          string         `json:"request_body"`
 	RequestSource        string         `json:"request_source"`

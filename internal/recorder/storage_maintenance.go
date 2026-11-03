@@ -207,7 +207,7 @@ func removeStoredRecord(tx *bolt.Tx, id []byte, summary Summary) error {
 			return err
 		}
 	}
-	for _, name := range [][]byte{records, summaries, imageAssets, imageJobs} {
+	for _, name := range [][]byte{records, summaries, imageAssets, imageJobs, fileAssets, fileJobs} {
 		if err := tx.Bucket(name).Delete(id); err != nil {
 			return err
 		}

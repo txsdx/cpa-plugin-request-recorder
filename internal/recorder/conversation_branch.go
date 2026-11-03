@@ -182,13 +182,16 @@ func inheritedResponseIDs(messages []Message) []string {
 // Inherited originals keep their local archive references even when the
 // parent's record is pruned. Copy only assets present in the child's history.
 func copyBranchImages(tx *bolt.Tx, parentID, childID string, wanted map[string]bool) error {
+	return copyBranchAssets(tx, imageAssets, parentID, childID, wanted)
+}
+func copyBranchAssets(tx *bolt.Tx, bucket []byte, parentID, childID string, wanted map[string]bool) error {
 	var parent, child []ImageAsset
-	if raw := tx.Bucket(imageAssets).Get([]byte(parentID)); raw != nil {
+	if raw := tx.Bucket(bucket).Get([]byte(parentID)); raw != nil {
 		if err := json.Unmarshal(raw, &parent); err != nil {
 			return err
 		}
 	}
-	if raw := tx.Bucket(imageAssets).Get([]byte(childID)); raw != nil {
+	if raw := tx.Bucket(bucket).Get([]byte(childID)); raw != nil {
 		if err := json.Unmarshal(raw, &child); err != nil {
 			return err
 		}
@@ -210,5 +213,5 @@ func copyBranchImages(tx *bolt.Tx, parentID, childID string, wanted map[string]b
 	if err != nil {
 		return err
 	}
-	return tx.Bucket(imageAssets).Put([]byte(childID), raw)
+	return tx.Bucket(bucket).Put([]byte(childID), raw)
 }

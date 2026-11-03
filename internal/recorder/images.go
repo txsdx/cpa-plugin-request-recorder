@@ -17,7 +17,9 @@ import (
 	"time"
 )
 
-type ImageAsset struct {
+// Image and file archives share metadata and the bounded durable worker.
+type ArchiveAsset struct {
+	Filename  string `json:"filename,omitempty"`
 	ID        string `json:"id"`
 	SourceURL string `json:"source_url,omitempty"`
 	Status    string `json:"status"`
@@ -26,6 +28,9 @@ type ImageAsset struct {
 	MIME      string `json:"mime,omitempty"`
 	Size      int64  `json:"size,omitempty"`
 }
+
+// ImageAsset names the image inventory; files use the same archive metadata.
+type ImageAsset = ArchiveAsset
 
 func imageID(source string) string {
 	sum := sha256.Sum256([]byte(source))
@@ -48,9 +53,12 @@ func imageDirectory(cfg Config) string {
 }
 
 var cacheImageName = regexp.MustCompile(`^[a-f0-9]{64}\.(png|jpg|gif|webp|bmp|avif|img)$`)
+var cacheFileName = regexp.MustCompile(`^[a-f0-9]{64}\.bin$`)
 var cacheTempName = regexp.MustCompile(`^\.rr-tmp-[a-f0-9]{32}$`)
 
-type imageArchive struct {
+type assetArchive struct {
+	fileMode   bool
+	inventory  archiveStore
 	previews   *previewCache
 	sizes      map[string]int64
 	store      *Store
@@ -70,7 +78,18 @@ type imageArchive struct {
 	serving    chan struct{}
 }
 
-func newImageArchive(cfg Config, store *Store) (*imageArchive, error) {
+func newImageArchive(cfg Config, store *Store) (*assetArchive, error) {
+	return newAssetArchive(cfg, store, false)
+}
+func newFileArchive(cfg Config, store *Store) (*assetArchive, error) {
+	cfg.ImagesDir = fileDirectory(cfg)
+	cfg.MaxImageBytes, cfg.MaxImageStorageBytes = cfg.MaxFileBytes, cfg.MaxFileStorageBytes
+	cfg.MaxImageFiles, cfg.MaxImagesPerRecord = cfg.MaxCachedFiles, cfg.MaxFilesPerRecord
+	cfg.ImageWorkers, cfg.ImageDownloadTimeoutSeconds = cfg.FileWorkers, cfg.FileDownloadTimeoutSeconds
+	cfg.ArchiveRemoteImages = cfg.ArchiveRemoteFiles
+	return newAssetArchive(cfg, store, true)
+}
+func newAssetArchive(cfg Config, store *Store, files bool) (*assetArchive, error) {
 	dir := imageDirectory(cfg)
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return nil, err
@@ -80,7 +99,7 @@ func newImageArchive(cfg Config, store *Store) (*imageArchive, error) {
 		return nil, err
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	a := &imageArchive{previews: newPreviewCache(), sizes: map[string]int64{}, store: store, root: root, cfg: cfg, fetcher: newImageFetcher(), ctx: ctx, cancel: cancel, queue: make(chan string, 256), jobs: map[string]bool{}, processing: map[string]bool{}, retries: map[string]bool{}, serving: make(chan struct{}, 2)}
+	a := &assetArchive{fileMode: files, inventory: store.assetStore(files), previews: newPreviewCache(), sizes: map[string]int64{}, store: store, root: root, cfg: cfg, fetcher: newImageFetcher(), ctx: ctx, cancel: cancel, queue: make(chan string, 256), jobs: map[string]bool{}, processing: map[string]bool{}, retries: map[string]bool{}, serving: make(chan struct{}, 2)}
 	f, err := root.Open(".")
 	if err != nil {
 		root.Close()
@@ -100,9 +119,9 @@ func newImageArchive(cfg Config, store *Store) (*imageArchive, error) {
 				_ = root.Remove(entry.Name())
 				continue
 			}
-			if cacheImageName.MatchString(entry.Name()) {
+			if a.cacheName(entry.Name()) {
 				name := entry.Name()
-				if strings.HasSuffix(name, ".img") {
+				if !a.fileMode && strings.HasSuffix(name, ".img") {
 					if renamed, err := a.renameImageExtension(name); err == nil {
 						name = renamed
 					} else {
@@ -121,7 +140,7 @@ func newImageArchive(cfg Config, store *Store) (*imageArchive, error) {
 	}
 	return a, nil
 }
-func (a *imageArchive) start() {
+func (a *assetArchive) start() {
 	for i := 0; i < a.cfg.ImageWorkers; i++ {
 		a.wg.Add(1)
 		go a.worker()
@@ -143,22 +162,22 @@ func (a *imageArchive) start() {
 	}()
 	a.resume()
 }
-func (a *imageArchive) resume() {
-	ids, _ := a.store.PendingImageRecords(256)
+func (a *assetArchive) resume() {
+	ids, _ := a.inventory.pending(256)
 	for _, id := range ids {
 		if !a.pending(id) {
 			a.enqueue(id)
 		}
 	}
 }
-func (a *imageArchive) close() error { a.cancel(); a.wg.Wait(); return a.root.Close() }
-func (a *imageArchive) enqueue(id string) bool {
+func (a *assetArchive) close() error { a.cancel(); a.wg.Wait(); return a.root.Close() }
+func (a *assetArchive) enqueue(id string) bool {
 	a.jobsMu.Lock()
 	defer a.jobsMu.Unlock()
 	if a.ctx.Err() != nil {
 		return false
 	}
-	if err := a.store.QueueImages(id); err != nil {
+	if err := a.inventory.queue(id); err != nil {
 		return false
 	}
 	if _, exists := a.jobs[id]; exists {
@@ -175,7 +194,7 @@ func (a *imageArchive) enqueue(id string) bool {
 		return false
 	}
 }
-func (a *imageArchive) worker() {
+func (a *assetArchive) worker() {
 	defer a.wg.Done()
 	for {
 		select {
@@ -189,7 +208,7 @@ func (a *imageArchive) worker() {
 			a.jobsMu.Lock()
 			dirty := a.jobs[id]
 			if complete && !dirty {
-				_ = a.store.FinishImages(id)
+				_ = a.inventory.finish(id)
 			}
 			delete(a.jobs, id)
 			delete(a.processing, id)
@@ -203,7 +222,7 @@ func (a *imageArchive) worker() {
 	}
 }
 
-type imageSource struct{ id, url string }
+type imageSource struct{ id, url, name string }
 
 func recordImageSources(r *Record, limit int) []imageSource {
 	sources := []imageSource{}
@@ -219,7 +238,7 @@ func recordImageSources(r *Record, limit int) []imageSource {
 				continue
 			}
 			seen[id] = true
-			sources = append(sources, imageSource{id, img.URL})
+			sources = append(sources, imageSource{id: id, url: img.URL})
 			if len(sources) >= limit {
 				return sources
 			}
@@ -227,7 +246,7 @@ func recordImageSources(r *Record, limit int) []imageSource {
 	}
 	return sources
 }
-func (a *imageArchive) process(id string) bool {
+func (a *assetArchive) process(id string) bool {
 	if a.ctx.Err() != nil {
 		return false
 	}
@@ -239,16 +258,25 @@ func (a *imageArchive) process(id string) bool {
 	if err != nil {
 		return false
 	}
-	sources := recordImageSources(r, a.cfg.MaxImagesPerRecord)
+	var sources []imageSource
+	if a.fileMode {
+		sources = recordFileSources(r, a.cfg.MaxImagesPerRecord)
+	} else {
+		sources = recordImageSources(r, a.cfg.MaxImagesPerRecord)
+	}
 	existing := map[string]ImageAsset{}
-	for _, im := range r.Images {
+	assets := r.Images
+	if a.fileMode {
+		assets = r.Files
+	}
+	for _, im := range assets {
 		existing[im.ID] = im
 	}
 	inventory := make([]ImageAsset, 0, len(sources))
 	for _, src := range sources {
 		asset, ok := existing[src.id]
 		if !ok {
-			asset = ImageAsset{ID: src.id, Status: "pending"}
+			asset = ImageAsset{ID: src.id, Status: "pending", Filename: src.name}
 			if !strings.HasPrefix(src.url, "data:") {
 				asset.SourceURL = src.url
 			}
@@ -263,7 +291,7 @@ func (a *imageArchive) process(id string) bool {
 		}
 		inventory = append(inventory, asset)
 	}
-	if err := a.store.SetImages(id, inventory); err != nil {
+	if err := a.inventory.set(id, inventory); err != nil {
 		return false
 	}
 	for i, src := range sources {
@@ -273,16 +301,16 @@ func (a *imageArchive) process(id string) bool {
 		if inventory[i].Status != "pending" {
 			continue
 		}
-		if _, err := a.store.GetImages(id); err != nil {
+		if _, err := a.inventory.get(id); err != nil {
 			return false
 		}
 		asset := &inventory[i]
 		if !strings.HasPrefix(src.url, "data:") && !a.cfg.ArchiveRemoteImages {
 			asset.Status = "blocked"
-			asset.Error = "服务端远程图片保存已关闭"
+			asset.Error = "服务端远程资源保存已关闭"
 		} else {
 			ctx, cancel := context.WithTimeout(a.ctx, time.Duration(a.cfg.ImageDownloadTimeoutSeconds)*time.Second)
-			data, mime, err := a.fetcher.fetch(ctx, src.url, a.cfg.MaxImageBytes)
+			data, mime, err := a.fetcher.fetchAsset(ctx, src.url, a.cfg.MaxImageBytes, a.fileMode)
 			cancel()
 			if err == nil {
 				var hash string
@@ -301,9 +329,12 @@ func (a *imageArchive) process(id string) bool {
 				}
 				asset.Status = "failed"
 				asset.Error = err.Error()
+				if a.fileMode {
+					asset.Error = strings.ReplaceAll(asset.Error, "图片", "文件")
+				}
 			}
 		}
-		if err := a.store.SetImages(id, inventory); err != nil {
+		if err := a.inventory.set(id, inventory); err != nil {
 			return false
 		}
 	}
@@ -322,7 +353,7 @@ func imageFileName(asset ImageAsset) string {
 
 // Existing .img archives contain original bytes. Rename only owned filenames;
 // sniff the payload instead of trusting a URL suffix or response Content-Type.
-func (a *imageArchive) renameImageExtension(old string) (string, error) {
+func (a *assetArchive) renameImageExtension(old string) (string, error) {
 	f, err := a.root.Open(old)
 	if err != nil {
 		return old, err
@@ -362,22 +393,22 @@ func (a *imageArchive) renameImageExtension(old string) (string, error) {
 	}
 	return name, nil
 }
-func (a *imageArchive) exists(asset ImageAsset) bool {
-	name := imageFileName(asset)
+func (a *assetArchive) exists(asset ImageAsset) bool {
+	name := a.fileName(asset)
 	if name == "" {
 		return false
 	}
 	info, err := a.root.Lstat(name)
 	return err == nil && info.Mode().IsRegular()
 }
-func (a *imageArchive) put(data []byte) (string, error) {
+func (a *assetArchive) put(data []byte) (string, error) {
 	sum := sha256.Sum256(data)
 	hash := hex.EncodeToString(sum[:])
-	mime, err := imageMIME(data)
+	mime, err := a.payloadMIME(data)
 	if err != nil {
 		return "", err
 	}
-	name := imageFileName(ImageAsset{Hash: hash, MIME: mime})
+	name := a.fileName(ImageAsset{Hash: hash, MIME: mime})
 	a.filesMu.Lock()
 	defer a.filesMu.Unlock()
 	if info, err := a.root.Lstat(name); err == nil {
@@ -439,9 +470,9 @@ func (a *imageArchive) put(data []byte) (string, error) {
 	a.sizes[name] = int64(len(data))
 	return hash, nil
 }
-func (a *imageArchive) read(asset ImageAsset) ([]byte, error) {
-	name := imageFileName(asset)
-	if name == "" || asset.Size < 1 || asset.Size > a.cfg.MaxImageBytes {
+func (a *assetArchive) read(asset ImageAsset) ([]byte, error) {
+	name := a.fileName(asset)
+	if name == "" || asset.Size < 0 || !a.fileMode && asset.Size < 1 || asset.Size > a.cfg.MaxImageBytes {
 		return nil, errors.New("无效图片元数据")
 	}
 	select {
@@ -465,8 +496,8 @@ func (a *imageArchive) read(asset ImageAsset) ([]byte, error) {
 	if err != nil || int64(len(data)) != asset.Size || imageBytesID(data) != asset.Hash {
 		return nil, errors.New("图片文件完整性检查失败")
 	}
-	mime, err := imageMIME(data)
-	if err != nil || mime != asset.MIME {
+	mime, err := a.payloadMIME(data)
+	if !a.fileMode && (err != nil || mime != asset.MIME) {
 		return nil, errors.New("图片文件类型检查失败")
 	}
 	return data, nil
@@ -474,10 +505,10 @@ func (a *imageArchive) read(asset ImageAsset) ([]byte, error) {
 
 var errImageBusy = errors.New("图片读取并发已满")
 
-func (a *imageArchive) collect(before time.Time) error {
+func (a *assetArchive) collect(before time.Time) error {
 	a.filesMu.Lock()
 	defer a.filesMu.Unlock()
-	refs, err := a.store.ImageReferences()
+	refs, err := a.inventory.references()
 	if err != nil {
 		return err
 	}
@@ -491,7 +522,7 @@ func (a *imageArchive) collect(before time.Time) error {
 		return err
 	}
 	for _, entry := range entries {
-		if !entry.Type().IsRegular() || !cacheImageName.MatchString(entry.Name()) {
+		if !entry.Type().IsRegular() || !a.cacheName(entry.Name()) {
 			continue
 		}
 		hash := strings.SplitN(entry.Name(), ".", 2)[0]
@@ -513,8 +544,8 @@ func (a *imageArchive) collect(before time.Time) error {
 	}
 	return nil
 }
-func (a *imageArchive) retry(id string) error {
-	images, err := a.store.GetImages(id)
+func (a *assetArchive) retry(id string) error {
+	images, err := a.inventory.get(id)
 	if err != nil {
 		return err
 	}
@@ -527,7 +558,7 @@ func (a *imageArchive) retry(id string) error {
 			images[i].Error = ""
 		}
 	}
-	if err := a.store.SetImages(id, images); err != nil {
+	if err := a.inventory.set(id, images); err != nil {
 		return err
 	}
 	if !a.enqueue(id) {
@@ -535,7 +566,7 @@ func (a *imageArchive) retry(id string) error {
 	}
 	return nil
 }
-func (a *imageArchive) decorate(messages []Message, inventory []ImageAsset) {
+func (a *assetArchive) decorate(messages []Message, inventory []ImageAsset) {
 	byID := map[string]ImageAsset{}
 	for _, asset := range inventory {
 		byID[asset.ID] = asset
@@ -559,13 +590,16 @@ func (a *imageArchive) decorate(messages []Message, inventory []ImageAsset) {
 		}
 	}
 }
-func (a *imageArchive) status() map[string]any {
+func (a *assetArchive) status() map[string]any {
 	a.jobsMu.Lock()
 	jobs := len(a.jobs)
 	a.jobsMu.Unlock()
 	a.filesMu.Lock()
 	used := a.used
 	a.filesMu.Unlock()
+	if a.fileMode {
+		return map[string]any{"files_dir": imageDirectory(a.cfg), "file_storage_bytes": used, "max_cached_files": a.cfg.MaxImageFiles, "max_file_storage_bytes": a.cfg.MaxImageStorageBytes, "pending_file_records": jobs, "max_file_bytes": a.cfg.MaxImageBytes}
+	}
 	return map[string]any{"images_dir": imageDirectory(a.cfg), "image_storage_bytes": used, "max_image_files": a.cfg.MaxImageFiles, "max_image_storage_bytes": a.cfg.MaxImageStorageBytes, "pending_image_records": jobs, "max_image_bytes": a.cfg.MaxImageBytes}
 }
 func imageDownloadName(asset ImageAsset) string {
@@ -573,7 +607,7 @@ func imageDownloadName(asset ImageAsset) string {
 	return fmt.Sprintf("%s.%s", asset.ID, ext)
 }
 
-func (a *imageArchive) pending(id string) bool {
+func (a *assetArchive) pending(id string) bool {
 	a.jobsMu.Lock()
 	defer a.jobsMu.Unlock()
 	_, ok := a.jobs[id]

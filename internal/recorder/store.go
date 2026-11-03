@@ -25,6 +25,8 @@ var panelAliases = []byte("panel_aliases")
 var traces = []byte("traces")
 var imageAssets = []byte("images")
 var imageJobs = []byte("image_jobs")
+var fileAssets = []byte("files")
+var fileJobs = []byte("file_jobs")
 
 var storageMeta = []byte("storage_meta")
 
@@ -65,7 +67,7 @@ func Open(path string) (*Store, error) {
 		if tx.Bucket(records) != nil && tx.Bucket(records).Stats().KeyN > 0 && (tx.Bucket(storageMeta) == nil || string(tx.Bucket(storageMeta).Get([]byte("record_layout"))) != "conversation-v1") {
 			return errors.New("旧数据库格式不再支持，请停止 CPA 并移走旧数据库后重启")
 		}
-		for _, name := range [][]byte{records, summaries, ordering, aliases, panelAliases, traces, imageAssets, imageJobs, bodyChunks, bodyCounts, storageMeta, conversationKeys, conversationAliases, requestRecords} {
+		for _, name := range [][]byte{records, summaries, ordering, aliases, panelAliases, traces, imageAssets, imageJobs, fileAssets, fileJobs, bodyChunks, bodyCounts, storageMeta, conversationKeys, conversationAliases, requestRecords} {
 			if _, e := tx.CreateBucketIfNotExists(name); e != nil {
 				return e
 			}
@@ -105,9 +107,13 @@ func (s *Store) Save(input *Record) error {
 		return err
 	}
 	branchImages := map[string]bool{}
+	branchFiles := map[string]bool{}
 	if r.Branch != nil && (r.Branch.Status == "response" || r.Branch.Status == "context") {
 		for _, source := range recordImageSources(r, 128) {
 			branchImages[source.id] = true
+		}
+		for _, source := range recordFileSources(r, 128) {
+			branchFiles[source.id] = true
 		}
 	}
 	stored, chunks := prepareStoredRecord(r)
@@ -212,6 +218,16 @@ func (s *Store) Save(input *Record) error {
 		if err := tx.Bucket(imageJobs).Put(id, []byte{1}); err != nil {
 			return err
 		}
+		if r.FileCount > 0 || tx.Bucket(fileAssets).Get(id) != nil {
+			if err := tx.Bucket(fileJobs).Put(id, []byte{1}); err != nil {
+				return err
+			}
+		}
+		if len(branchFiles) > 0 {
+			if err := copyBranchAssets(tx, fileAssets, r.Branch.ParentConversationID, r.ID, branchFiles); err != nil {
+				return err
+			}
+		}
 		if len(branchImages) > 0 {
 			if err := copyBranchImages(tx, r.Branch.ParentConversationID, r.ID, branchImages); err != nil {
 				return err
@@ -231,6 +247,9 @@ func (s *Store) Save(input *Record) error {
 				}
 				if obsolete.RequestID == originalRequestID && (obsolete.KeyID == "" || obsolete.KeyID == r.KeyID) {
 					if err := mergeImageInventory(tx, []byte(originalID), id); err != nil {
+						return err
+					}
+					if err := mergeAssetInventory(tx, fileAssets, []byte(originalID), id); err != nil {
 						return err
 					}
 					if err := removeStoredRecord(tx, []byte(originalID), obsolete); err != nil {
@@ -278,6 +297,11 @@ func (s *Store) getRecord(id string, historyOnly bool) (*Record, error) {
 		}
 		if raw := tx.Bucket(imageAssets).Get([]byte(id)); raw != nil {
 			if err := json.Unmarshal(raw, &r.Images); err != nil {
+				return err
+			}
+		}
+		if raw := tx.Bucket(fileAssets).Get([]byte(id)); raw != nil {
+			if err := json.Unmarshal(raw, &r.Files); err != nil {
 				return err
 			}
 		}
@@ -432,114 +456,6 @@ func (s *Store) ByTrace(trace string) ([]Summary, error) {
 		return nil
 	})
 	return out, err
-}
-
-// Image metadata is separate from large request bodies. Download progress updates
-// cannot overwrite concurrent usage updates or rewrite multi-MiB bodies.
-func (s *Store) GetImages(id string) ([]ImageAsset, error) {
-	out := []ImageAsset{}
-	err := s.view(func(tx *bolt.Tx) error {
-		if tx.Bucket(records).Get([]byte(id)) == nil {
-			return ErrNotFound
-		}
-		if raw := tx.Bucket(imageAssets).Get([]byte(id)); raw != nil {
-			return json.Unmarshal(raw, &out)
-		}
-		return nil
-	})
-	return out, err
-}
-func (s *Store) SetImages(id string, assets []ImageAsset) error {
-	raw, err := json.Marshal(assets)
-	if err != nil {
-		return err
-	}
-	return s.update(len(raw), func(tx *bolt.Tx) error {
-		if tx.Bucket(records).Get([]byte(id)) == nil {
-			return ErrNotFound
-		}
-		return tx.Bucket(imageAssets).Put([]byte(id), raw)
-	})
-}
-func (s *Store) ImageReferences() (map[string]bool, error) {
-	refs := map[string]bool{}
-	err := s.view(func(tx *bolt.Tx) error {
-		return tx.Bucket(imageAssets).ForEach(func(_, raw []byte) error {
-			var images []ImageAsset
-			if err := json.Unmarshal(raw, &images); err != nil {
-				return err
-			}
-			for _, im := range images {
-				if im.Status == "ready" {
-					refs[im.Hash] = true
-				}
-			}
-			return nil
-		})
-	})
-	return refs, err
-}
-func (s *Store) PendingImageRecords(limit int) ([]string, error) {
-	ids := []string{}
-	err := s.view(func(tx *bolt.Tx) error {
-		c := tx.Bucket(imageJobs).Cursor()
-		for k, _ := c.First(); k != nil && len(ids) < limit; k, _ = c.Next() {
-			ids = append(ids, string(k))
-		}
-		return nil
-	})
-	return ids, err
-}
-func (s *Store) QueueImages(id string) error {
-	queued := false
-	if err := s.view(func(tx *bolt.Tx) error {
-		if tx.Bucket(records).Get([]byte(id)) == nil {
-			return ErrNotFound
-		}
-		queued = tx.Bucket(imageJobs).Get([]byte(id)) != nil
-		return nil
-	}); err != nil {
-		return err
-	}
-	if queued {
-		return nil
-	}
-	return s.update(0, func(tx *bolt.Tx) error {
-		if tx.Bucket(records).Get([]byte(id)) == nil {
-			return ErrNotFound
-		}
-		return tx.Bucket(imageJobs).Put([]byte(id), []byte{1})
-	})
-}
-func (s *Store) FinishImages(id string) error {
-	return s.update(0, func(tx *bolt.Tx) error {
-		return tx.Bucket(imageJobs).Delete([]byte(id))
-	})
-}
-
-func (s *Store) ImageFailed(recordID, id, message string) error {
-	return s.update(0, func(tx *bolt.Tx) error {
-		b := tx.Bucket(imageAssets)
-		raw := b.Get([]byte(recordID))
-		if raw == nil {
-			return ErrNotFound
-		}
-		var assets []ImageAsset
-		if err := json.Unmarshal(raw, &assets); err != nil {
-			return err
-		}
-		for i := range assets {
-			if assets[i].ID == id {
-				assets[i].Status = "failed"
-				assets[i].Error = message
-			}
-		}
-		encoded, err := json.Marshal(assets)
-		if err != nil {
-			return err
-		}
-		return b.Put([]byte(recordID), encoded)
-	})
 }
 
 // Explicit recorder aliases take precedence over the last CPAMC snapshot.

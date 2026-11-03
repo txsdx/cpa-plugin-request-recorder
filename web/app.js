@@ -125,7 +125,11 @@ function savedConnection() {
 function rememberConnection(key) {
   // Match CPAMC's current reversible obfuscation, not cryptographic protection.
   const bytes = new TextEncoder().encode(
-    JSON.stringify({ version: 1, apiBase: location.origin, managementKey: key }),
+    JSON.stringify({
+      version: 1,
+      apiBase: location.origin,
+      managementKey: key,
+    }),
   );
   const secret = new TextEncoder().encode(
     "cli-proxy-api-webui::secure-storage|" + location.host,
@@ -437,7 +441,9 @@ async function refresh() {
         "div",
         "",
         `采集中 ${status.active} · 丢弃 ${status.dropped_requests}` +
-          (status.unmatched_usage ? ` · 用量待关联 ${status.unmatched_usage}` : ""),
+          (status.unmatched_usage
+            ? ` · 用量待关联 ${status.unmatched_usage}`
+            : ""),
       ),
     );
     if (status.database_file_bytes != null)
@@ -457,7 +463,8 @@ async function refresh() {
         `已因容量淘汰 ${fmt(status.capacity_evicted_records)} 条最旧记录。`,
       );
     if (status.last_error) warnings.push("采集错误：" + status.last_error);
-    if (status.usage_warning) warnings.push("用量统计提示：" + status.usage_warning);
+    if (status.usage_warning)
+      warnings.push("用量统计提示：" + status.usage_warning);
     if (status.dropped_requests)
       warnings.push(
         "部分请求因采集或会话容量限制未更新，请查看采集错误和容量设置。",
@@ -516,7 +523,9 @@ function renderRows(items) {
       el("small", "", r.id.slice(0, 12) + (r.stream ? " · STREAM" : " · JSON")),
     );
     if (r.branch)
-      time.append(el("small", "", r.branch.kind === "fork" ? "↳ 分支会话" : "↳ 子会话"));
+      time.append(
+        el("small", "", r.branch.kind === "fork" ? "↳ 分支会话" : "↳ 子会话"),
+      );
     const who = el(
       "td",
       "",
@@ -555,15 +564,25 @@ function renderRows(items) {
     );
     if (r.ttft_ms == null && r.first_chunk_ms != null)
       latency.append(el("small", "", `首分片 ${duration(r.first_chunk_ms)}`));
-    const steps = el("td", "mono", r.conversation_steps == null ? "—" : fmt(r.conversation_steps) + " 步");
+    const steps = el(
+      "td",
+      "mono",
+      r.conversation_steps == null ? "—" : fmt(r.conversation_steps) + " 步",
+    );
     steps.dataset.conversationSteps = "";
-    steps.title = r.conversation_steps == null ? "打开详情或下一次请求后补充历史条目的步数。" : "用户消息、模型回复、工具调用和工具结果；文字、思考和图片按消息合并计步。";
+    steps.title =
+      r.conversation_steps == null
+        ? "打开详情或下一次请求后补充历史条目的步数。"
+        : "用户消息、模型回复、工具调用和工具结果；文字、思考和图片按消息合并计步。";
     const usage = latestRequestTokens(r);
     const tokens = el("td", "mono", fmt(usage.total));
     tokens.dataset.requestTokens = "";
     tokens.title = "最新一次请求的输入 + 输出总 Token；会话累计见详情标题。";
     if (usage.input != null || usage.output != null) {
-      tokens.append(el("small", "", `输入 ${fmt(usage.input)}`), el("small", "", `输出 ${fmt(usage.output)}`));
+      tokens.append(
+        el("small", "", `输入 ${fmt(usage.input)}`),
+        el("small", "", `输出 ${fmt(usage.output)}`),
+      );
     }
     tokens.append(el("small", "", `缓存 ${pct(r.cache_ratio)}`));
     if (r.warnings?.length)
@@ -574,7 +593,17 @@ function renderRows(items) {
     response.append(
       el("div", "row-preview", r.latest_response || "点击条目查看模型最终结果"),
     );
-    tr.append(time, who, model, state, steps, latency, tokens, prompt, response);
+    tr.append(
+      time,
+      who,
+      model,
+      state,
+      steps,
+      latency,
+      tokens,
+      prompt,
+      response,
+    );
     $("rows").append(tr);
   }
   renderKeyChoices();
@@ -586,17 +615,21 @@ function latestRequestTokens(r) {
     output = t.OutputTokens ?? 0;
   // Messages cache buckets are additional input, while OpenAI includes cache
   // and reasoning in its input/output. Prefer the host's reported total.
-  if (r.request_input_tokens == null && /claude|anthropic/i.test(r.provider || ""))
+  if (
+    r.request_input_tokens == null &&
+    /claude|anthropic/i.test(r.provider || "")
+  )
     input += (t.CacheReadTokens || 0) + (t.CacheCreationTokens || 0);
   let total = t.TotalTokens || 0;
   if (!total) {
-    if (/gemini|vertex/i.test(r.provider || "")) output += t.ReasoningTokens || 0;
+    if (/gemini|vertex/i.test(r.provider || ""))
+      output += t.ReasoningTokens || 0;
     total = input + output;
   } else if (input + output > 0 && total >= input + output) {
     output = total - input;
   }
-  if (!input && !output && total) return {total};
-  return {input, output, total};
+  if (!input && !output && total) return { total };
+  return { input, output, total };
 }
 function renderDetailHeader() {
   if (!detail) return;
@@ -605,7 +638,8 @@ function renderDetailHeader() {
       duration_ms: r.duration_ms,
       total_tokens: r.tokens?.TotalTokens,
       duration_requests:
-        r.duration_ms > 0 || (r.completed_at && !r.completed_at.startsWith("0001-"))
+        r.duration_ms > 0 ||
+        (r.completed_at && !r.completed_at.startsWith("0001-"))
           ? 1
           : 0,
       token_requests: r.tokens ? 1 : 0,
@@ -672,7 +706,8 @@ function section(title, body) {
 // URL is never assigned to img.src, linked, or fetched by this page.
 let imageSession = 0,
   imageController = new AbortController(),
-  imagePollTimer = 0;
+  imagePollTimer = 0,
+  filePollTimer = 0;
 let imageQueue = [],
   imageActive = 0,
   imageObserver = null;
@@ -692,6 +727,8 @@ function clearDetailImages() {
   imageObserver = null;
   clearTimeout(imagePollTimer);
   imagePollTimer = 0;
+  clearTimeout(filePollTimer);
+  filePollTimer = 0;
   $("full-image").removeAttribute("src");
   $("image-download").onclick = null;
   $("image-download").disabled = false;
@@ -939,6 +976,143 @@ function imageView(image) {
   return box;
 }
 
+function scheduleFilePoll() {
+  if (filePollTimer || !detail) return;
+  const recordID = detail.record.id,
+    session = imageSession;
+  filePollTimer = setTimeout(async () => {
+    filePollTimer = 0;
+    if (
+      session !== imageSession ||
+      detail?.record.id !== recordID ||
+      !$("detail").open
+    )
+      return;
+    try {
+      const state = await api(
+        "/files?record_id=" + encodeURIComponent(recordID),
+      );
+      if (session !== imageSession || detail?.record.id !== recordID) return;
+      detail.record.files = state.files;
+      const byID = new Map(state.files.map((file) => [file.id, file]));
+      let changed = false,
+        pending = false;
+      for (const message of detail.conversation || []) {
+        for (const file of message.files || []) {
+          if (!file.id) continue;
+          const asset = byID.get(file.id);
+          const status =
+            asset?.status ||
+            (state.files.length >= state.limit ? "blocked" : "pending");
+          const error =
+            asset?.error ||
+            (status === "blocked" ? "超过单条记录文件数量限制" : "");
+          if (file.status !== status || file.error !== error) {
+            Object.assign(file, {
+              status,
+              error,
+              mime: asset?.mime,
+              size: asset?.size,
+            });
+            changed = true;
+          }
+          pending ||= status === "pending";
+        }
+      }
+      if (changed) renderDetail(true);
+      if (pending || state.pending) scheduleFilePoll();
+    } catch (error) {
+      notice("无法查询 CPA 文件归档状态：" + error.message);
+    }
+  }, 1000);
+}
+function fileView(file) {
+  const box = el("div", "file-card"),
+    recordID = detail.record.id;
+  box.dataset.fileId = file.id || "";
+  box.append(el("strong", "file-name", "📎 " + file.filename));
+  if (file.status === "ready") {
+    box.append(
+      el(
+        "small",
+        "muted",
+        [file.mime, fileSize(file.size ?? 0), "原文件已保存在 CPA"]
+          .filter(Boolean)
+          .join(" · "),
+      ),
+    );
+    const button = el("button", "link", "下载原文件");
+    button.type = "button";
+    button.onclick = async () => {
+      const session = imageSession,
+        signal = imageController.signal;
+      button.disabled = true;
+      button.textContent = "正在下载…";
+      try {
+        const response = await fetch(
+          API +
+            "/file?record_id=" +
+            encodeURIComponent(recordID) +
+            "&id=" +
+            encodeURIComponent(file.id),
+          {
+            signal,
+            credentials: "omit",
+            cache: "no-store",
+            headers: { Authorization: "Bearer " + managementKey },
+          },
+        );
+        if (!response.ok) {
+          const error = await response.json().catch(() => ({}));
+          throw new Error(
+            error.error || "CPA 文件读取失败（HTTP " + response.status + "）",
+          );
+        }
+        const blob = await response.blob();
+        if (session === imageSession && !signal.aborted)
+          downloadFile(blob, file.filename);
+      } catch (error) {
+        if (error.name !== "AbortError" && session === imageSession)
+          notice(error.message);
+      } finally {
+        button.disabled = false;
+        button.textContent = "下载原文件";
+      }
+    };
+    box.append(button);
+  } else {
+    box.append(
+      el(
+        "p",
+        file.status === "pending" ? "muted" : "error",
+        file.status === "pending"
+          ? "CPA 正在保存原文件…"
+          : file.error || "原文件不可获取",
+      ),
+    );
+    if (file.status === "pending") scheduleFilePoll();
+    else if (file.id && file.status !== "unavailable") {
+      const retry = el("button", "link", "重试服务端保存");
+      retry.type = "button";
+      retry.onclick = async () => {
+        try {
+          await api("/files/retry?record_id=" + encodeURIComponent(recordID), {
+            method: "POST",
+          });
+          file.status = "pending";
+          file.error = "";
+          renderDetail(true);
+          scheduleFilePoll();
+        } catch (error) {
+          notice(error.message);
+        }
+      };
+      box.append(retry);
+    }
+  }
+  return box;
+}
+
 function bubble(m) {
   const box = el("article", "bubble " + m.role + " " + m.kind);
   const label = el("div", "bubble-label");
@@ -966,9 +1140,19 @@ function bubble(m) {
   if (m.name) label.append(el("span", "mono", m.name));
   if (m.tool_call_id) label.append(el("span", "mono", m.tool_call_id));
   if (m.choice) label.append(el("span", "", `候选 ${m.choice}`));
+  if (m.recorded_at && Number.isFinite(Date.parse(m.recorded_at))) {
+    const timestamp = el("time", "message-time", date(m.recorded_at));
+    timestamp.dateTime = m.recorded_at;
+    timestamp.title =
+      m.time_source === "request_received"
+        ? "CPA 接收本次请求的时间；工具结果为提交到 CPA 的时间"
+        : "CPA 本次响应结束时的记录时间";
+    label.append(timestamp);
+  }
   const body = el("div", "bubble-content");
-  if (m.images?.length) {
-    m.images.forEach((im) => body.append(imageView(im)));
+  if (m.images?.length || m.files?.length) {
+    m.images?.forEach((im) => body.append(imageView(im)));
+    m.files?.forEach((file) => body.append(fileView(file)));
     if (m.content) {
       body.append(el("pre", "", m.content));
     }
@@ -1023,8 +1207,10 @@ function jumpPrompt(direction) {
   if (!target) return;
   const body = $("detail-body"),
     top =
-      body.scrollTop + target.getBoundingClientRect().top -
-      body.getBoundingClientRect().top - 16;
+      body.scrollTop +
+      target.getBoundingClientRect().top -
+      body.getBoundingClientRect().top -
+      16;
   body.scrollTo({ top, behavior: "auto" });
   target.focus({ preventScroll: true });
   promptCursor = index;
@@ -1066,7 +1252,14 @@ function renderDetail(preserveScroll = false) {
         missing: "父会话或分叉点未被记录，展示请求携带的可用历史。",
       };
       const info = el("div", "view-note branch-note");
-      info.append(el("span", "", (branch.kind === "fork" ? "分支会话：" : "子会话：") + (states[branch.status] || states.missing)));
+      info.append(
+        el(
+          "span",
+          "",
+          (branch.kind === "fork" ? "分支会话：" : "子会话：") +
+            (states[branch.status] || states.missing),
+        ),
+      );
       if (branch.parent_conversation_id) {
         const open = el("button", "link", "打开父会话");
         open.type = "button";
@@ -1081,7 +1274,7 @@ function renderDetail(preserveScroll = false) {
       el(
         "div",
         "view-note",
-        "每个会话保留最新完整历史。原图通过 CPA 鉴权接口提供，浏览器不访问源站。",
+        "每个会话保留最新完整历史。原图和附件通过 CPA 鉴权接口提供，浏览器不访问源站。",
       ),
     );
     if (!detail.conversation?.length)
@@ -1187,6 +1380,10 @@ $("storage-open").onclick = async () => {
       ["数据库上限", fileSize(stats.max_database_bytes)],
       ["因容量淘汰记录", fmt(stats.capacity_evicted_records)],
       ["自动整理", stats.database_maintenance_running ? "进行中" : "待命"],
+      ["原图目录占用", fileSize(stats.image_storage_bytes)],
+      ["附件目录占用", fileSize(stats.file_storage_bytes)],
+      ["附件容量上限", fileSize(stats.max_file_storage_bytes)],
+      ["附件保存队列", fmt(stats.pending_file_records)],
     ])
       list.append(el("dt", "", label), el("dd", "mono", value));
     body.replaceChildren(
@@ -1199,7 +1396,7 @@ $("storage-open").onclick = async () => {
       el(
         "p",
         "",
-        "容量接近上限时自动淘汰最旧记录并整理空闲页。整理期间正常写入会在切换前重放；原图目录、CPA 源日志及整理临时文件不计入此上限。",
+        "容量接近上限时自动淘汰最旧记录并整理空闲页。整理期间正常写入会在切换前重放；原图和附件目录、CPA 源日志及整理临时文件不计入数据库上限。",
       ),
       el(
         "p",
@@ -1233,7 +1430,8 @@ $("login-form").onsubmit = async (e) => {
     // Unchecking also removes a previously remembered key, even if login fails.
     if (!remember) localStorage.removeItem(SAVED_LOGIN_KEY);
   } catch {
-    storageError = "已连接，但浏览器无法移除已保存密钥，请清除此站点的浏览器数据。";
+    storageError =
+      "已连接，但浏览器无法移除已保存密钥，请清除此站点的浏览器数据。";
   }
   try {
     if (!(await connectWithKey(key, "manual"))) return;
@@ -1243,7 +1441,8 @@ $("login-form").onsubmit = async (e) => {
         authSource = "saved";
         $("forget-key").hidden = false;
       } catch {
-        $("login-error").textContent = "已连接，但浏览器无法保存密钥；关闭此窗口可继续使用。";
+        $("login-error").textContent =
+          "已连接，但浏览器无法保存密钥；关闭此窗口可继续使用。";
         return;
       }
     }
@@ -1266,9 +1465,11 @@ $("forget-key").onclick = () => {
       authSource = "";
       clearAuthenticatedView();
     }
-    $("login-error").textContent = "已忘记插件保存的密钥。CPAMC 的登录状态不受影响。";
+    $("login-error").textContent =
+      "已忘记插件保存的密钥。CPAMC 的登录状态不受影响。";
   } catch {
-    $("login-error").textContent = "浏览器无法移除已保存密钥，请清除此站点的浏览器数据。";
+    $("login-error").textContent =
+      "浏览器无法移除已保存密钥，请清除此站点的浏览器数据。";
   }
 };
 $("alias-form").onsubmit = async (e) => {
@@ -1371,7 +1572,9 @@ $("export-markdown").onclick = async () => {
     );
     if (!response.ok) {
       const error = await response.json().catch(() => ({}));
-      throw new Error(error.error || "Markdown 导出失败（" + response.status + "）");
+      throw new Error(
+        error.error || "Markdown 导出失败（" + response.status + "）",
+      );
     }
     const blob = await response.blob();
     if (revision !== authGeneration) return;

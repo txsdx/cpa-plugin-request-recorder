@@ -23,6 +23,7 @@ func conversationMessages(r *Record) []Message {
 	if r.ConversationHistory != "" && json.Unmarshal([]byte(r.ConversationHistory), &messages) == nil {
 		for i := range messages {
 			normalizeToolImages(&messages[i])
+			normalizeMessageFiles(&messages[i])
 		}
 		return messages
 	}
@@ -54,6 +55,11 @@ func contextMessageID(m Message) string {
 	}
 	for _, image := range m.Images {
 		writeConversationField(h, image.URL)
+	}
+	for _, f := range m.Files {
+		for _, value := range []string{f.Filename, f.URL, f.Reference} {
+			writeConversationField(h, value)
+		}
 	}
 	return hex.EncodeToString(h.Sum(nil))
 }
@@ -124,6 +130,7 @@ func (s *Store) prepareConversation(r *Record) ([]string, error) {
 	for i := range input {
 		input[i].Source = "request"
 	}
+	stampConversationTimes(input, output, r.StartedAt, r.CompletedAt)
 	previousResponseID := str(decode(r.RequestBody)["previous_response_id"])
 	linked := false
 	session := clientConversationID(r)
@@ -342,6 +349,10 @@ func (s *Store) prepareConversation(r *Record) ([]string, error) {
 	}
 	steps := conversationSteps(finalMessages)
 	r.ConversationSteps = &steps
+	r.FileCount = 0
+	for _, m := range finalMessages {
+		r.FileCount += len(m.Files)
+	}
 	if scope != "" {
 		inherited := map[string]bool{}
 		for _, id := range r.InheritedResponseIDs {
@@ -429,17 +440,25 @@ func conversationMessageBytes(messages []Message) int {
 			n += len(image.URL)
 		}
 	}
+	for _, m := range messages {
+		for _, f := range m.Files {
+			n += len(f.URL) + len(f.Filename) + len(f.Reference) + 128
+		}
+	}
 	return n
 }
 
 func mergeImageInventory(tx *bolt.Tx, from, to []byte) error {
+	return mergeAssetInventory(tx, imageAssets, from, to)
+}
+func mergeAssetInventory(tx *bolt.Tx, bucket []byte, from, to []byte) error {
 	var previous, current []ImageAsset
-	if raw := tx.Bucket(imageAssets).Get(from); raw != nil {
+	if raw := tx.Bucket(bucket).Get(from); raw != nil {
 		if err := json.Unmarshal(raw, &previous); err != nil {
 			return err
 		}
 	}
-	if raw := tx.Bucket(imageAssets).Get(to); raw != nil {
+	if raw := tx.Bucket(bucket).Get(to); raw != nil {
 		if err := json.Unmarshal(raw, &current); err != nil {
 			return err
 		}
@@ -461,5 +480,5 @@ func mergeImageInventory(tx *bolt.Tx, from, to []byte) error {
 	if err != nil {
 		return err
 	}
-	return tx.Bucket(imageAssets).Put(to, raw)
+	return tx.Bucket(bucket).Put(to, raw)
 }

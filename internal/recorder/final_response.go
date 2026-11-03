@@ -141,6 +141,10 @@ func previewText(messages []Message, role string) string {
 			parts = append(parts, m.Content)
 		} else if len(m.Images) > 0 {
 			parts = append(parts, fmt.Sprintf("[原图 ×%d]", len(m.Images)))
+		} else if len(m.Files) > 0 {
+			for _, file := range m.Files {
+				parts = append(parts, "[附件] "+file.Filename)
+			}
 		} else if m.Kind == "tool_call" {
 			parts = append(parts, "调用工具 "+m.Name+": "+m.Content)
 		} else if m.Kind == "reasoning" && !hasText && len(parts) == 0 {
